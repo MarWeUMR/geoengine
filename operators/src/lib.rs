@@ -30,6 +30,7 @@ pub mod plot;
 pub mod processing;
 pub mod source;
 pub mod util;
+pub mod pro;
 
 /// Compiles Geo Engine Pro
 #[cfg(feature = "pro")]
