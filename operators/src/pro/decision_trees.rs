@@ -21,7 +21,7 @@ mod tests {
     use geo_dtrees::util::data_processing::{
         get_tangram_matrix, get_train_test_split_arrays, get_xg_matrix, xg_set_ground_truth,
     };
-    use geoengine_datatypes::primitives::{QueryRectangle, SpatialPartition2D, Coordinate2D};
+    use geoengine_datatypes::primitives::{Coordinate2D, QueryRectangle, SpatialPartition2D};
     use geoengine_datatypes::raster::{GridOrEmpty, TilingSpecification};
     use geoengine_datatypes::test_data;
     use geoengine_datatypes::util::test::TestDefault;
@@ -111,11 +111,11 @@ mod tests {
     async fn initialize_operator(
         gcm: GdalMetaDataRegular,
     ) -> Box<dyn RasterQueryProcessor<RasterType = u8>> {
-        // let tiling_specification =
-        //     TilingSpecification::new(Coordinate2D::default(), [16, 16].into());
+        let tiling_specification =
+            TilingSpecification::new(Coordinate2D::default(), [128, 128].into());
 
         let mut mc = MockExecutionContext::test_default();
-        // mc.tiling_specification = tiling_specification;
+        mc.tiling_specification = tiling_specification;
 
         let id = DatasetId::Internal {
             dataset_id: InternalDatasetId::new(),
@@ -154,7 +154,7 @@ mod tests {
         )
         .unwrap();
 
-        let query_spatial_resolution = SpatialResolution::new(20.0, 20.0).unwrap();
+        let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
 
         let qry_rectangle = QueryRectangle {
             spatial_bounds: query_bbox,
@@ -173,6 +173,7 @@ mod tests {
             match processor.unwrap().grid_array {
                 GridOrEmpty::Grid(processor) => {
                     let data = &processor.data;
+                    println!("{:?}", processor.shape);
                     // TODO: make more generic
                     let data_mapped: Vec<f64> = data.into_iter().map(|elem| *elem as f64).collect();
                     buffer_proc.push(data_mapped);
@@ -356,7 +357,7 @@ mod tests {
                 tabular_like_data_vec.extend_from_slice(&row);
             }
 
-            let data_arr_2d = Array2::from_shape_vec((262144, 3), tabular_like_data_vec).unwrap();
+            let data_arr_2d = Array2::from_shape_vec((16384, 3), tabular_like_data_vec).unwrap();
 
             // prepare tecnical metadata for dmatrix
             // xgboost needs the memory information of the data
@@ -370,7 +371,7 @@ mod tests {
                 data_arr_2d.as_slice_memory_order().unwrap(),
                 byte_size_ax_0,
                 byte_size_ax_1,
-                262144 as usize,
+                16384 as usize,
                 3 as usize,
             )
             .unwrap();
@@ -441,74 +442,5 @@ mod tests {
         }
 
         println!("training done");
-
-        // make a single vec for each rectangle
-        // TODO: "flatten logic" dürfte noch nicht stimmen, soll heißen die anordnung der pixel ist vermutlich gemischt und nicht in der richtigen reihenfolge
-        // let mut flat_bands: Vec<Vec<u8>> = vec![];
-        //
-        // for band in bands {
-        //     flat_bands.push(band.into_iter().flatten().map(|elem| elem as u8).collect());
-        // }
-        //
-        // let b = flat_bands.get(0).unwrap();
-        //
-        // // make streams from each band
-        // let stream_vec: Vec<_> = flat_bands
-        //     .into_iter()
-        //     .map(|band| futures::stream::iter(band))
-        //     .collect();
-        //
-        // let svz2 = StreamVectorZip::new(stream_vec);
-        //
-        // // finally collect the data as rows
-        // let rows: Vec<Vec<u8>> = svz2.collect().await;
-        //
-        // let arr: Vec<f32> = rows
-        //     .iter()
-        //     .flatten()
-        //     .map(|elem| elem.clone() as f32)
-        //     .collect();
-        //
-        // let data = Array2::from_shape_vec((rows.len(), 5), arr).unwrap();
-        //
-        // let (x_train_array, x_test_array, y_train_array, y_test_array) =
-        //     get_train_test_split_arrays(data, 4);
-        //
-        // let (mut x_train_xgmat, mut x_test_xgmat) = get_xg_matrix(x_train_array, x_test_array);
-        //
-        // xg_set_ground_truth(
-        //     &mut x_train_xgmat,
-        //     &mut x_test_xgmat,
-        //     &y_train_array,
-        //     &y_test_array,
-        // );
-        //
-        // let keys = vec![
-        //     "validate_parameters",
-        //     "process_type",
-        //     "tree_method",
-        //     "eval_metric",
-        //     "max_depth",
-        // ];
-        //
-        // let values = vec!["1", "default", "hist", "rmse", "3"];
-        // let evals = &[(&x_test_xgmat, "train")];
-        // let bst = Booster::my_train(
-        //     Some(evals),
-        //     &x_train_xgmat,
-        //     keys.clone(),
-        //     values.clone(),
-        //     None,
-        // )
-        // .unwrap();
-
-        // // train model, and print evaluation data
-        // let bst = Booster::train(&params).unwrap();
-        //
-        // let scores = bst.predict(&x_test_xgmat).unwrap();
-        // let labels = x_test_xgmat.get_labels().unwrap();
-        //
-        // println!("{:?}", labels);
-        // println!("{:?}", scores);
     }
 }
