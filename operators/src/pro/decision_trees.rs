@@ -112,7 +112,7 @@ mod tests {
         gcm: GdalMetaDataRegular,
     ) -> Box<dyn RasterQueryProcessor<RasterType = u8>> {
         let tiling_specification =
-            TilingSpecification::new(Coordinate2D::default(), [128, 128].into());
+            TilingSpecification::new(Coordinate2D::default(), [16, 16].into());
 
         let mut mc = MockExecutionContext::test_default();
         mc.tiling_specification = tiling_specification;
@@ -340,8 +340,11 @@ mod tests {
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
 
+        let tile_size = 16;
+
         // iterate over each tile, every time an instance of xgbooster is updated
         for tile in zipped_data.iter() {
+            println!("{:?}", &tile);
             // get the band data for each tile
             let band_1 = tile.get(0).unwrap();
             let band_2 = tile.get(1).unwrap();
@@ -357,7 +360,8 @@ mod tests {
                 tabular_like_data_vec.extend_from_slice(&row);
             }
 
-            let data_arr_2d = Array2::from_shape_vec((16384, 3), tabular_like_data_vec).unwrap();
+            let data_arr_2d =
+                Array2::from_shape_vec((tile_size * tile_size, 3), tabular_like_data_vec).unwrap();
 
             // prepare tecnical metadata for dmatrix
             // xgboost needs the memory information of the data
@@ -371,7 +375,7 @@ mod tests {
                 data_arr_2d.as_slice_memory_order().unwrap(),
                 byte_size_ax_0,
                 byte_size_ax_1,
-                16384 as usize,
+                (tile_size * tile_size) as usize,
                 3 as usize,
             )
             .unwrap();
