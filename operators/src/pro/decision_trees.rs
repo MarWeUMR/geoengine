@@ -37,6 +37,8 @@ mod tests {
     use geoengine_datatypes::{raster::RasterPropertiesEntryType, util::Identifier};
     use itertools::izip;
     use ndarray::{arr2, Array, Array2};
+    use rand::distributions::Uniform;
+    use rand::prelude::Distribution;
     use xgboost_bindings::{parameters, Booster, DMatrix};
 
     use std::mem;
@@ -342,16 +344,50 @@ mod tests {
 
         let tile_size = 16;
 
+        let mut reservoir: Vec<&Vec<Vec<f64>>> = Vec::new();
+        let capacity = 10;
+
+        let step = Uniform::new(0.0, 1.0);
+        let mut rng = rand::thread_rng();
+        let choice: f64 = step.sample(&mut rng);
+
+        let mut v = Vec::new();
+
+        let mut w = (choice.ln() / capacity as f64).exp();
         // iterate over each tile, every time an instance of xgbooster is updated
-        for tile in zipped_data.iter() {
-            println!("{:?}", &tile);
+        for (i, tile) in zipped_data.iter().enumerate() {
+            if i < 10 {
+                reservoir.push(tile);
+            } else {
+                // i := i + floor(log(random())/log(1-W)) + 1
+
+                let step = Uniform::new(0.0, 1.0);
+                let mut rng = rand::thread_rng();
+                let choice: f64 = step.sample(&mut rng);
+
+                let s = (choice.ln() / (1.0 - w).ln()).floor();
+
+                let step = Uniform::new(0.0, 1.0);
+                let mut rng = rand::thread_rng();
+                let choice: f64 = step.sample(&mut rng);
+
+                w = w * (choice.ln() / capacity as f64).exp();
+
+                v.push(s);
+
+                dbg!(w);
+                dbg!(i);
+                dbg!(s);
+            }
+
+            // println!("{:?}", &tile);
             // get the band data for each tile
             let band_1 = tile.get(0).unwrap();
             let band_2 = tile.get(1).unwrap();
             let band_3 = tile.get(2).unwrap();
             let band_4 = tile.get(3).unwrap();
 
-            println!("band.len() {:?}", band_1.len());
+            // println!("band.len() {:?}", band_1.len());
 
             // we need all features (bands) per datapoint (row, coordinate etc)
             let mut tabular_like_data_vec = Vec::new();
@@ -361,7 +397,8 @@ mod tests {
             }
 
             let data_arr_2d =
-                Array2::from_shape_vec((tile_size * tile_size, 3), tabular_like_data_vec).unwrap();
+                Array2::from_shape_vec((i32::pow(tile_size, 2) as usize, 3), tabular_like_data_vec)
+                    .unwrap();
 
             // prepare tecnical metadata for dmatrix
             // xgboost needs the memory information of the data
@@ -375,7 +412,7 @@ mod tests {
                 data_arr_2d.as_slice_memory_order().unwrap(),
                 byte_size_ax_0,
                 byte_size_ax_1,
-                (tile_size * tile_size) as usize,
+                i32::pow(tile_size, 2) as usize,
                 3 as usize,
             )
             .unwrap();
@@ -445,6 +482,7 @@ mod tests {
             }
         }
 
+        println!("{:?}", v);
         println!("training done");
     }
 }
