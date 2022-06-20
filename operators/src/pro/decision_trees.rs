@@ -359,9 +359,13 @@ mod tests {
         let mut next_i = 10;
 
         for (i, tile) in zipped_data.iter().enumerate() {
+            dbg!(i);
+            dbg!(next_i);
             if i < 10 {
+                println!("if");
                 reservoir.push(tile);
             } else if i == next_i {
+                println!("else if");
                 // i := i + floor(log(random())/log(1-W)) + 1
 
                 let step = Uniform::new(0.0, 1.0);
@@ -376,12 +380,13 @@ mod tests {
 
                 w = w * (choice.ln() / capacity as f64).exp();
 
-                next_i = i + s as usize;
+                next_i = i + 1 + s as usize;
                 v.push(s);
 
                 dbg!(w);
                 dbg!(i);
                 dbg!(s);
+                dbg!(next_i);
             }
 
             // println!("{:?}", &tile);
