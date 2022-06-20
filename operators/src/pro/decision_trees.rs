@@ -355,10 +355,13 @@ mod tests {
 
         let mut w = (choice.ln() / capacity as f64).exp();
         // iterate over each tile, every time an instance of xgbooster is updated
+
+        let mut next_i = 10;
+
         for (i, tile) in zipped_data.iter().enumerate() {
             if i < 10 {
                 reservoir.push(tile);
-            } else {
+            } else if i == next_i {
                 // i := i + floor(log(random())/log(1-W)) + 1
 
                 let step = Uniform::new(0.0, 1.0);
@@ -373,6 +376,7 @@ mod tests {
 
                 w = w * (choice.ln() / capacity as f64).exp();
 
+                next_i = i + s as usize;
                 v.push(s);
 
                 dbg!(w);
