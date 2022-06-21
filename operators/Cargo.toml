@@ -14,7 +14,7 @@ pro = ["geoengine-datatypes/pro"]
 
 [dependencies]
 
-geo_dtrees = {git = "https://github.com/MarWeUMR/geo_dtrees"}
+geo_dtrees = {git = "https://github.com/MarWeUMR/geo_dtrees", branch="no_tangram"}
 xgboost-bindings = {git = "https://github.com/MarWeUMR/xgboost-bindings"}
 arrow = { version = "8.0", features = ["simd"] }
 async-trait = "0.1"

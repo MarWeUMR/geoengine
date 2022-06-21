@@ -17,9 +17,8 @@ mod tests {
     };
 
     use futures::StreamExt;
-    use geo_dtrees::tangram::tangram_wrapper::{tangram_predict, tangram_train_model, ModelType};
     use geo_dtrees::util::data_processing::{
-        get_tangram_matrix, get_train_test_split_arrays, get_xg_matrix, xg_set_ground_truth,
+        get_train_test_split_arrays, get_xg_matrix, xg_set_ground_truth,
     };
     use geoengine_datatypes::primitives::{Coordinate2D, QueryRectangle, SpatialPartition2D};
     use geoengine_datatypes::raster::{GridOrEmpty, TilingSpecification};
@@ -189,110 +188,7 @@ mod tests {
         buffer_proc
     }
 
-    #[tokio::test]
-    async fn tangram_rayon_test() {
-        // fetch data from geoengine
-        let data = prepare_tangram_test_data().await;
-
-        // create thread pool env
-        // this is necessary to make the thread pool handling play nice with tangram
-        let pool = create_rayon_thread_pool(0);
-        let jh = spawn_blocking_with_thread_pool(pool, || {
-            // take data and train the tangram tree
-            tangram_raster_training(data)
-        });
-
-        let predictions = jh.await.unwrap();
-
-        println!("{:?}", predictions);
-    }
-
-    async fn prepare_tangram_test_data(
-    ) -> ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 2]>> {
-        let paths = [
-            "raster/landcover/B2_2014-01-01.tif",
-            "raster/landcover/B3_2014-01-01.tif",
-            "raster/landcover/B4_2014-01-01.tif",
-            "raster/landcover/B5_2014-01-01.tif",
-            "raster/landcover/B12_2014-01-01.tif",
-        ];
-
-        // contains the vectors of all bands.
-        // each band consists of multiple rectangles
-        // each rectangle is represented by a vec of u8's
-        let mut bands: Vec<Vec<Vec<f64>>> = vec![];
-
-        // load each band given by distinct .tif files
-        for path in paths.iter() {
-            let gcm = get_gdal_config_metadata(path);
-            let init_op = initialize_operator(gcm).await;
-            let buffer_proc = get_band_data(init_op).await;
-            bands.push(buffer_proc);
-        }
-
-        // make a single vec for each rectangle
-        // TODO: "flatten logic" dürfte noch nicht stimmen, soll heißen die anordnung der pixel ist vermutlich gemischt und nicht in der richtigen reihenfolge
-        let mut flat_bands: Vec<Vec<u8>> = vec![];
-
-        for band in bands {
-            flat_bands.push(band.into_iter().flatten().map(|elem| elem as u8).collect());
-        }
-
-        // make streams from each band
-        let stream_vec: Vec<_> = flat_bands
-            .into_iter()
-            .map(|band| futures::stream::iter(band))
-            .collect();
-
-        let svz2 = StreamVectorZip::new(stream_vec);
-
-        // finally collect the data as rows
-        let rows: Vec<Vec<u8>> = svz2.collect().await;
-
-        let arr: Vec<f32> = rows
-            .iter()
-            .flatten()
-            .map(|elem| elem.clone() as f32)
-            .collect();
-
-        let data = Array2::from_shape_vec((rows.len(), 5), arr).unwrap();
-
-        data
-    }
-
-    fn tangram_raster_training(
-        data: ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 2]>>,
-    ) -> ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 1]>> {
-        let (x_train_array, x_test_array, y_train_array, y_test_array) =
-            get_train_test_split_arrays(data, 4);
-
-        let (x_train, x_test, y_train, y_test) = get_tangram_matrix(
-            x_train_array,
-            x_test_array,
-            y_train_array,
-            y_test_array,
-            vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            "e".into(),
-        );
-
-        let train_output = tangram_train_model(ModelType::Numeric, x_train, y_train.clone());
-
-        let arr_size = y_test.len();
-
-        let mut predictions = Array::zeros(arr_size);
-        tangram_predict(
-            ModelType::Numeric,
-            x_test,
-            train_output,
-            &mut predictions,
-            0,
-        );
-
-        // println!("{:?}", x_train_array);
-
-        predictions
-    }
-
+        
     #[tokio::test]
     async fn xg_raster_input_test() {
         let paths = [
@@ -351,7 +247,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let choice: f64 = step.sample(&mut rng);
 
-        let mut v = Vec::new();
+        let mut v: Vec<f64> = Vec::new();
 
         let mut w = (choice.ln() / capacity as f64).exp();
         // iterate over each tile, every time an instance of xgbooster is updated
@@ -359,14 +255,19 @@ mod tests {
         let mut next_i = 10;
 
         for (i, tile) in zipped_data.iter().enumerate() {
-            dbg!(i);
-            dbg!(next_i);
             if i < 10 {
-                println!("if");
                 reservoir.push(tile);
             } else if i == next_i {
-                println!("else if");
-                // i := i + floor(log(random())/log(1-W)) + 1
+                println!("\nTILE ---------------------------------\n");
+                println!("current i: {:?}", i);
+
+                let step = Uniform::new(0.0, 9.0);
+                let mut rng = rand::thread_rng();
+                let swap_elem_idx: f64 = step.sample(&mut rng);
+
+                reservoir.push(tile);
+                reservoir.swap_remove(swap_elem_idx as usize);
+                println!("reservoir len: {:?}", reservoir.len());
 
                 let step = Uniform::new(0.0, 1.0);
                 let mut rng = rand::thread_rng();
@@ -381,113 +282,128 @@ mod tests {
                 w = w * (choice.ln() / capacity as f64).exp();
 
                 next_i = i + 1 + s as usize;
-                v.push(s);
 
-                dbg!(w);
-                dbg!(i);
-                dbg!(s);
-                dbg!(next_i);
-            }
+                println!("next_i: {:?}", next_i);
 
-            // println!("{:?}", &tile);
-            // get the band data for each tile
-            let band_1 = tile.get(0).unwrap();
-            let band_2 = tile.get(1).unwrap();
-            let band_3 = tile.get(2).unwrap();
-            let band_4 = tile.get(3).unwrap();
+                let mut band_1 = Vec::new();
+                let mut band_2 = Vec::new();
+                let mut band_3 = Vec::new();
+                let mut band_4 = Vec::new();
 
-            // println!("band.len() {:?}", band_1.len());
 
-            // we need all features (bands) per datapoint (row, coordinate etc)
-            let mut tabular_like_data_vec = Vec::new();
-            for (a, b, c) in izip!(band_1, band_2, band_3) {
-                let row = vec![a.to_owned(), b.to_owned(), c.to_owned()];
-                tabular_like_data_vec.extend_from_slice(&row);
-            }
 
-            let data_arr_2d =
-                Array2::from_shape_vec((i32::pow(tile_size, 2) as usize, 3), tabular_like_data_vec)
+                // go over all tiles in the reservoir
+                // and make a collective band from all tiles
+                for tile in reservoir.iter() {
+                    for elem in tile.get(0).unwrap().iter() {
+                        band_1.push(elem);
+                    }
+                    for elem in tile.get(1).unwrap().iter() {
+                        band_2.push(elem);
+                    }
+                    for elem in tile.get(2).unwrap().iter() {
+                        band_3.push(elem);
+                    }
+                    for elem in tile.get(3).unwrap().iter() {
+                        band_4.push(elem);
+                    }
+                }
+
+                
+
+                // we need all features (bands) per datapoint (row, coordinate etc)
+                let mut tabular_like_data_vec = Vec::new();
+                for (a, b, c) in izip!(band_1, band_2, band_3) {
+                    let row = vec![a.to_owned(), b.to_owned(), c.to_owned()];
+                    tabular_like_data_vec.extend_from_slice(&row);
+                }
+
+                let data_arr_2d = Array2::from_shape_vec(
+                    (i32::pow(tile_size, 2) as usize * 10, 3),
+                    tabular_like_data_vec,
+                )
+                .unwrap();
+
+                // prepare tecnical metadata for dmatrix
+                // xgboost needs the memory information of the data
+                let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+                let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+                let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+                let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+                // get xgboost style matrices
+                let mut xg_matrix = DMatrix::from_col_major_f64(
+                    data_arr_2d.as_slice_memory_order().unwrap(),
+                    byte_size_ax_0,
+                    byte_size_ax_1,
+                    i32::pow(tile_size, 2) as usize,
+                    3 as usize,
+                )
+                .unwrap();
+
+                // set labels
+                // TODO: make more generic
+                let lbls: Vec<f32> = band_4.iter().map(|elem| **elem as f32).collect();
+                xg_matrix.set_labels(lbls.as_slice()).unwrap();
+
+                // start actual training
+                if booster_vec.len() == 0 {
+                    println!("generating initial model");
+
+                    // in the first iteration, there is no model yet.
+                    matrix_vec.push(xg_matrix);
+                    let keys = vec![
+                        "validate_parameters",
+                        "process_type",
+                        "tree_method",
+                        "eval_metric",
+                        "max_depth",
+                    ];
+
+                    let values = vec!["1", "default", "hist", "rmse", "3"];
+                    let evals = &[(matrix_vec.get(0).unwrap(), "train")];
+                    let bst = Booster::my_train(
+                        Some(evals),
+                        matrix_vec.get(0).unwrap(),
+                        keys,
+                        values,
+                        None, // <- No old model yet
+                    )
                     .unwrap();
 
-            // prepare tecnical metadata for dmatrix
-            // xgboost needs the memory information of the data
-            let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-            let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-            let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-            let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+                    // store the first booster
+                    booster_vec.push(bst);
+                } else {
+                    println!("updating model");
 
-            // get xgboost style matrices
-            let mut xg_matrix = DMatrix::from_col_major_f64(
-                data_arr_2d.as_slice_memory_order().unwrap(),
-                byte_size_ax_0,
-                byte_size_ax_1,
-                i32::pow(tile_size, 2) as usize,
-                3 as usize,
-            )
-            .unwrap();
+                    // this is a consecutive iteration, so we need the last booster instance
+                    // to update the model
+                    let bst = booster_vec.pop().unwrap();
 
-            // set labels
-            // TODO: make more generic
-            let lbls: Vec<f32> = band_4.iter().map(|elem| *elem as f32).collect();
-            xg_matrix.set_labels(lbls.as_slice()).unwrap();
+                    let keys = vec![
+                        "validate_parameters",
+                        "process_type",
+                        "updater",
+                        "refresh_leaf",
+                        "eval_metric",
+                        "max_depth",
+                    ];
 
-            // start actual training
-            if booster_vec.len() == 0 {
-                println!("generating initial model");
+                    let values = vec!["1", "update", "refresh", "true", "rmse", "3"];
 
-                // in the first iteration, there is no model yet.
-                matrix_vec.push(xg_matrix);
-                let keys = vec![
-                    "validate_parameters",
-                    "process_type",
-                    "tree_method",
-                    "eval_metric",
-                    "max_depth",
-                ];
+                    let evals = &[(matrix_vec.get(0).unwrap(), "orig"), (&xg_matrix, "train")];
+                    let bst_updated = Booster::my_train(
+                        Some(evals),
+                        &xg_matrix,
+                        keys,
+                        values,
+                        Some(bst), // <- this contains the last model which is now being updated
+                    )
+                    .unwrap();
 
-                let values = vec!["1", "default", "hist", "rmse", "3"];
-                let evals = &[(matrix_vec.get(0).unwrap(), "train")];
-                let bst = Booster::my_train(
-                    Some(evals),
-                    matrix_vec.get(0).unwrap(),
-                    keys,
-                    values,
-                    None, // <- No old model yet
-                )
-                .unwrap();
-
-                // store the first booster
-                booster_vec.push(bst);
-            } else {
-                println!("updating model");
-
-                // this is a consecutive iteration, so we need the last booster instance
-                // to update the model
-                let bst = booster_vec.pop().unwrap();
-
-                let keys = vec![
-                    "validate_parameters",
-                    "process_type",
-                    "updater",
-                    "refresh_leaf",
-                    "eval_metric",
-                    "max_depth",
-                ];
-
-                let values = vec!["1", "update", "refresh", "true", "rmse", "3"];
-
-                let evals = &[(matrix_vec.get(0).unwrap(), "orig"), (&xg_matrix, "train")];
-                let bst_updated = Booster::my_train(
-                    Some(evals),
-                    &xg_matrix,
-                    keys,
-                    values,
-                    Some(bst), // <- this contains the last model which is now being updated
-                )
-                .unwrap();
-
-                // store the new booster instance
-                booster_vec.push(bst_updated);
+                    // store the new booster instance
+                    booster_vec.push(bst_updated);
+                }
             }
         }
 
