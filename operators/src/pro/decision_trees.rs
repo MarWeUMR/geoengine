@@ -5,8 +5,8 @@ mod tests {
     use crate::processing::meteosat::{
         new_channel_key, new_offset_key, new_satellite_key, new_slope_key,
     };
-    use crate::util::stream_zip::{StreamTupleZip, StreamVectorZip};
-    use crate::util::{create_rayon_thread_pool, spawn_blocking_with_thread_pool};
+    use crate::util::stream_zip::StreamVectorZip;
+    
     use crate::{
         engine::{MockExecutionContext, MockQueryContext, RasterOperator, RasterResultDescriptor},
         source::{
@@ -17,9 +17,7 @@ mod tests {
     };
 
     use futures::StreamExt;
-    use geo_dtrees::util::data_processing::{
-        get_train_test_split_arrays, get_xg_matrix, xg_set_ground_truth,
-    };
+    
     use geoengine_datatypes::primitives::{Coordinate2D, QueryRectangle, SpatialPartition2D};
     use geoengine_datatypes::raster::{GridOrEmpty, TilingSpecification};
     use geoengine_datatypes::test_data;
@@ -188,7 +186,6 @@ mod tests {
         buffer_proc
     }
 
-        
     #[tokio::test]
     async fn xg_raster_input_test() {
         let paths = [
@@ -247,8 +244,6 @@ mod tests {
         let mut rng = rand::thread_rng();
         let choice: f64 = step.sample(&mut rng);
 
-        let mut v: Vec<f64> = Vec::new();
-
         let mut w = (choice.ln() / capacity as f64).exp();
         // iterate over each tile, every time an instance of xgbooster is updated
 
@@ -258,6 +253,8 @@ mod tests {
             if i < 10 {
                 reservoir.push(tile);
             } else if i == next_i {
+                println!("tile.len(): {:?}",tile.len());
+                println!("tile[0].len(): {:?}",tile.get(0).unwrap().len());
                 println!("\nTILE ---------------------------------\n");
                 println!("current i: {:?}", i);
 
@@ -290,8 +287,6 @@ mod tests {
                 let mut band_3 = Vec::new();
                 let mut band_4 = Vec::new();
 
-
-
                 // go over all tiles in the reservoir
                 // and make a collective band from all tiles
                 for tile in reservoir.iter() {
@@ -308,8 +303,6 @@ mod tests {
                         band_4.push(elem);
                     }
                 }
-
-                
 
                 // we need all features (bands) per datapoint (row, coordinate etc)
                 let mut tabular_like_data_vec = Vec::new();
@@ -407,7 +400,6 @@ mod tests {
             }
         }
 
-        println!("{:?}", v);
-        println!("training done");
+        println!("training done.");
     }
 }
