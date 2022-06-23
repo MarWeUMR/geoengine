@@ -33,7 +33,7 @@ pub mod util;
 pub mod pro;
 
 /// Compiles Geo Engine Pro
-#[cfg(feature = "pro")]
-pub mod pro;
+// #[cfg(feature = "pro")]
+// pub mod pro;
 
 use geoengine_datatypes::test_data;

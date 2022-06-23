@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "datatypes",
+    # "datatypes",
     "operators",
-    "services",
+    # "services",
 ]
 
 # Rust does not inline across crates if link-time optimization (LTO) is off, which it is by default.

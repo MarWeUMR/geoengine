@@ -1,0 +1,7 @@
+<OGRVRTDataSource>
+         <OGRVRTLayer name="data"> 
+             <SrcDataSource>data.csv</SrcDataSource> 
+             <GeometryType>wkbPoint</GeometryType> 
+             <GeometryField encoding="PointFromColumns" x="x" y="y" z="Class_ID"/> 
+         </OGRVRTLayer> 
+     </OGRVRTDataSource>
