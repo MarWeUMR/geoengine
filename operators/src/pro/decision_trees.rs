@@ -32,14 +32,15 @@ mod tests {
         spatial_reference::{SpatialReference, SpatialReferenceAuthority, SpatialReferenceOption},
     };
     use geoengine_datatypes::{raster::RasterPropertiesEntryType, util::Identifier};
-    use itertools::izip;
+    use itertools::{izip, Itertools};
     use ndarray::Array2;
     use rand::distributions::Uniform;
     use rand::prelude::Distribution;
     use xgboost_bindings::{Booster, DMatrix};
 
     use std::collections::{BTreeMap, HashMap};
-    use std::mem;
+    use std::f64;
+    use std::mem::{self, size_of};
     use std::path::{Path, PathBuf};
 
     fn get_gdal_config_metadata(path: &str) -> GdalMetaDataRegular {
@@ -188,9 +189,6 @@ mod tests {
 
     #[tokio::test]
     async fn xg_raster_input_test() {
-        // TODO: implement something to verify reservoir sampling works
-        // TODO: implement max. memory reservation
-        // TODO: implement something to 'exhaust' available data on successive iterations
         let paths = [
             "B2_2014-01-01.tif",
             "B3_2014-01-01.tif",
@@ -405,24 +403,55 @@ mod tests {
         println!("training done.");
     }
 
-    #[tokio::test]
-    async fn xg_reservoir_test() {
-        let capacity = 1024;
+    fn calculate_reservoir_size(max_mem_cap: usize, magnitude: &str, paths: &[&str], type_size: usize) -> usize {
+        let band_count = paths.len();
+
+        let factor = match magnitude.to_lowercase().as_str() {
+            "kb" => 1024,
+            "mb" => 1024 * 1024,
+            "gb" => 1024 * 1024 * 1024,
+            _ => 1
+        };
+
+        let n_bytes_per_band = (max_mem_cap * factor) / band_count;
+        let n_elements_per_band = n_bytes_per_band / type_size;
+
+        println!("possible reservoir size is {:?} elements (per band)", n_elements_per_band);
+
+        n_elements_per_band
+    }
+
+    #[test]
+    fn mem_size_test() {
         let paths = [
             "raster/landcover/B2_2014-01-01.tif",
             "raster/landcover/B3_2014-01-01.tif",
             "raster/landcover/B4_2014-01-01.tif",
             "raster/landcover/Class_ID_2014-01-01.tif",
         ];
+        calculate_reservoir_size(1, "kb", &paths, mem::size_of::<f64>());
+    }
+
+    #[tokio::test]
+    async fn xg_reservoir_test() {
+        // TODO: implement max. memory reservation
+        // TODO?: implement something to 'exhaust' available data on successive iterations
+        let paths = [
+            "raster/landcover/B2_2014-01-01.tif",
+            "raster/landcover/B3_2014-01-01.tif",
+            "raster/landcover/B4_2014-01-01.tif",
+            "raster/landcover/Class_ID_2014-01-01.tif",
+        ];
+        
+        let capacity = calculate_reservoir_size(1, "kb", &paths, mem::size_of::<f64>());
 
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
 
-        // let mut btm_idx: BTreeMap<_, _> = BTreeMap::new();
-        let mut vec_of_vecs = vec![];
+        let mut vec_of_reservoir_indices = vec![];
 
         for _ in 0..500 {
-            let mut v = Vec::new();
+            let mut reservoir_indices = Vec::new();
             // contains the vectors of all bands.
             // each band consists of multiple rectangles
             // each rectangle is represented by a vec of u8's
@@ -475,7 +504,7 @@ mod tests {
                         reservoir_b2.push(b2);
                         reservoir_target.push(target);
 
-                        v.push(i);
+                        reservoir_indices.push(i);
                         i = i + 1;
                     }
                 } else {
@@ -498,8 +527,9 @@ mod tests {
                         reservoir_b2.swap_remove(idx_swap_elem);
                         reservoir_target.swap_remove(idx_swap_elem);
 
-                        v.push(i);
-                        v.swap_remove(idx_swap_elem);
+                        // save indices to check distribution of reservoir elements
+                        reservoir_indices.push(i);
+                        reservoir_indices.swap_remove(idx_swap_elem);
 
                         let step = Uniform::new(0.0, 1.0);
                         let mut rng = rand::thread_rng();
@@ -604,40 +634,23 @@ mod tests {
                 // store the new booster instance
                 booster_vec.push(bst_updated);
             }
-            vec_of_vecs.push(v);
+            vec_of_reservoir_indices.push(reservoir_indices);
         }
 
-        let mut hm_idx: BTreeMap<usize, usize> = BTreeMap::new();
-        let mut vv = Vec::new();
-
-        for v in vec_of_vecs.iter() {
-            for elem in v.iter() {
-                vv.push(elem);
-                // *hm_idx.entry(*elem).or_insert(0) += 1;
-            }
-        }
+        let all_chosen_elements = vec_of_reservoir_indices.iter().flatten().collect_vec();
 
         // serialize hashmap to csv
         let mut wtr = csv::Writer::from_path(Path::new("test.csv")).unwrap();
 
         wtr.write_record(&["index"]).unwrap();
 
-        for elem in vv.iter() {
+        for elem in all_chosen_elements.iter() {
             let val = format!("{elem}");
             wtr.write_record(&[val]).unwrap();
         }
 
-        // for (k, v) in hm_idx.into_iter() {
-        // for (k, v) in hm_idx.into_iter() {
-        //     let key = format!("{k}");
-        //     let value = format!("{v}");
-        //     wtr.write_record(&[key, value]).unwrap();
-        // }
-
         wtr.flush().unwrap();
 
-        println!("{:?} vecs", vec_of_vecs.len());
-        println!("with {:?} elements", vec_of_vecs.get(0).unwrap().len());
         println!("training done");
     }
 }
