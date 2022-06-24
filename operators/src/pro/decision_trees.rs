@@ -680,13 +680,33 @@ mod tests {
         ];
 
         // define reservoir size
-        let capacity = calculate_reservoir_size(1, "kb", 4, mem::size_of::<f64>(), None);
+        let capacity = calculate_reservoir_size(10, "kb", 4, mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
-        let mut booster_vec: Vec<Booster> = Vec::new();
-        let mut matrix_vec: Vec<DMatrix> = Vec::new();
         let training_rounds = 5;
 
+        // setup data/model cache
+        let mut booster_vec: Vec<Booster> = Vec::new();
+        let mut matrix_vec: Vec<DMatrix> = Vec::new();
+
+        // do geoengine magic
+        let zipped_data: Vec<Vec<Vec<f64>>> = get_zipped_data(&paths).await;
+
+        // TODO: make this automatic
+        let tile_size = 16;
+
+        for _ in 0..training_rounds {
+            // generate a reservoir
+            let res = generate_reservoir(zipped_data.clone(), tile_size, capacity).await;
+
+            // make xg compatible, trainable datastructure
+            let xg_matrix = make_xg_data(vec![res.0, res.1, res.2], capacity);
+
+            train_model(&mut booster_vec, &mut matrix_vec, xg_matrix);
+        }
+    }
+
+    async fn get_zipped_data(paths: &[&str]) -> Vec<Vec<Vec<f64>>> {
         let mut bands: Vec<Vec<Vec<f64>>> = vec![];
 
         // load each band given by distinct .tif files
@@ -705,20 +725,7 @@ mod tests {
         let svz2 = StreamVectorZip::new(stream_vec);
 
         let zipped_data: Vec<Vec<Vec<f64>>> = svz2.collect().await;
-
-        let tile_size = 16;
-
-        for _ in 0..training_rounds {
-            // generate a reservoir
-            let res = generate_reservoir(zipped_data.clone(), tile_size, capacity).await;
-
-            // make xg compatible, trainable datastructure
-            let xg_matrix = make_xg_data(vec![res.0, res.1, res.2], capacity);
-
-            train_model(&mut booster_vec, &mut matrix_vec, xg_matrix);
-
-            // initial training round
-        }
+        zipped_data
     }
 
     fn train_model(
@@ -841,10 +848,7 @@ mod tests {
 
         for (tile_counter, tile) in zipped_data.iter().enumerate() {
             // check if next element is in current tile or we can skip this tile
-            if elem_not_in_this_tile(i, tile_counter, tile_size) == true {
-                continue;
-            }
-            if i >= (tile_counter + 1) * (tile_size * tile_size) {
+            if elem_in_this_tile(i, tile_counter, tile_size) == false {
                 continue;
             }
 
@@ -855,9 +859,18 @@ mod tests {
             // initial fill of the reservoir
             if i < capacity {
                 while i < capacity {
-                    let elem_b1 = b1.get(i).unwrap();
-                    let elem_b2 = b2.get(i).unwrap();
-                    let elem_target = target.get(i).unwrap();
+                        println!("{}", i);
+                    
+                    if i >= (tile_counter+1) * (tile_size*tile_size) {
+                        println!("{}", i);
+                        break;
+                    }
+
+                    let idx = i - tile_counter * (tile_size*tile_size);
+                    
+                    let elem_b1 = b1.get(idx).unwrap();
+                    let elem_b2 = b2.get(idx).unwrap();
+                    let elem_target = target.get(idx).unwrap();
                     reservoir_b1.push(elem_b1.to_owned());
                     reservoir_b2.push(elem_b2.to_owned());
                     reservoir_target.push(elem_target.to_owned());
@@ -865,51 +878,60 @@ mod tests {
                 }
             }
             // consecutive fill of the reservoir with random elements
-            else {
-                while i < (tile_counter + 1) * (tile_size * tile_size) {
-                    let step = Uniform::new(0, capacity);
-                    let mut rng = rand::thread_rng();
-                    let idx_swap_elem = step.sample(&mut rng);
+            while i < (tile_counter + 1) * (tile_size * tile_size) {
+                let step = Uniform::new(0, capacity);
+                let mut rng = rand::thread_rng();
+                let idx_swap_elem = step.sample(&mut rng);
 
-                    let idx_this_tile = i - (tile_counter * (tile_size * tile_size));
-
-                    // change element
-                    let a = tile.get(0).unwrap().get(idx_this_tile).unwrap();
-                    let b = tile.get(1).unwrap().get(idx_this_tile).unwrap();
-                    let c = tile.get(3).unwrap().get(idx_this_tile).unwrap();
-                    reservoir_b1.push(a.to_owned());
-                    reservoir_b2.push(b.to_owned());
-                    reservoir_target.push(c.to_owned());
-
-                    let l = reservoir_b2.len();
-
-                    reservoir_b1.swap_remove(idx_swap_elem);
-                    reservoir_b2.swap_remove(idx_swap_elem);
-                    reservoir_target.swap_remove(idx_swap_elem);
-
-                    // save indices to check distribution of reservoir elements
-
-                    let step = Uniform::new(0.0, 1.0);
-                    let mut rng = rand::thread_rng();
-                    let choice: f64 = step.sample(&mut rng);
-
-                    let s = (choice.ln() / (1.0 - w).ln()).floor();
-
-                    let step = Uniform::new(0.0, 1.0);
-                    let mut rng = rand::thread_rng();
-                    let choice: f64 = step.sample(&mut rng);
-
-                    w = w * (choice.ln() / capacity as f64).exp();
-
-                    i = i + 1 + s as usize;
+                let mut idx_this_tile = 0;
+                // i is in the first tile
+                if i < (tile_size * tile_size) {
+                    idx_this_tile = i;
                 }
+                // i is not in the first tile
+                else {
+                    idx_this_tile = i - (tile_counter * (tile_size * tile_size));
+                }
+
+                // change element
+                let a = tile.get(0).unwrap().get(idx_this_tile).unwrap();
+                let b = tile.get(1).unwrap().get(idx_this_tile).unwrap();
+                let c = tile.get(3).unwrap().get(idx_this_tile).unwrap();
+                reservoir_b1.push(a.to_owned());
+                reservoir_b2.push(b.to_owned());
+                reservoir_target.push(c.to_owned());
+
+                let l = reservoir_b2.len();
+
+                reservoir_b1.swap_remove(idx_swap_elem);
+                reservoir_b2.swap_remove(idx_swap_elem);
+                reservoir_target.swap_remove(idx_swap_elem);
+
+                // save indices to check distribution of reservoir elements
+
+                let step = Uniform::new(0.0, 1.0);
+                let mut rng = rand::thread_rng();
+                let choice: f64 = step.sample(&mut rng);
+
+                let s = (choice.ln() / (1.0 - w).ln()).floor();
+
+                let step = Uniform::new(0.0, 1.0);
+                let mut rng = rand::thread_rng();
+                let choice: f64 = step.sample(&mut rng);
+
+                w = w * (choice.ln() / capacity as f64).exp();
+
+                i = i + 1 + s as usize;
             }
         }
 
         (reservoir_b1, reservoir_b2, reservoir_target)
     }
 
-    fn elem_not_in_this_tile(i: usize, tile_counter: usize, tile_size: usize) -> bool{
-        i >= (tile_counter + 1) * (tile_size * tile_size)
+    /// Is the i-th element in the j-th tile?
+    /// True if i is less than i+1 * tile_size.
+    fn elem_in_this_tile(i: usize, tile_counter: usize, tile_size: usize) -> bool {
+        let result = i < (tile_counter + 1) * (tile_size * tile_size);
+        result
     }
 }
