@@ -38,8 +38,9 @@ mod tests {
     use rand::prelude::Distribution;
     use xgboost_bindings::{Booster, DMatrix};
 
+    use std::collections::{BTreeMap, HashMap};
     use std::mem;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn get_gdal_config_metadata(path: &str) -> GdalMetaDataRegular {
         let no_data_value = Some(-339999995214436424907732413799364296704.0);
@@ -187,6 +188,9 @@ mod tests {
 
     #[tokio::test]
     async fn xg_raster_input_test() {
+        // TODO: implement something to verify reservoir sampling works
+        // TODO: implement max. memory reservation
+        // TODO: implement something to 'exhaust' available data on successive iterations
         let paths = [
             "B2_2014-01-01.tif",
             "B3_2014-01-01.tif",
@@ -414,7 +418,11 @@ mod tests {
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
 
-        for _ in 0..5 {
+        // let mut btm_idx: BTreeMap<_, _> = BTreeMap::new();
+        let mut vec_of_vecs = vec![];
+
+        for _ in 0..500 {
+            let mut v = Vec::new();
             // contains the vectors of all bands.
             // each band consists of multiple rectangles
             // each rectangle is represented by a vec of u8's
@@ -450,7 +458,7 @@ mod tests {
 
             let mut reservoir_b1: Vec<_> = Vec::new();
             let mut reservoir_b2: Vec<_> = Vec::new();
-            let mut reservoir_lbl: Vec<_> = Vec::new();
+            let mut reservoir_target: Vec<_> = Vec::new();
 
             for (tile_counter, tile) in zipped_data.iter().enumerate() {
                 // check if next element is in current tile or we can skip this tile
@@ -461,11 +469,13 @@ mod tests {
                 if i < capacity {
                     let band_1 = tile.get(0).unwrap();
                     let band_2 = tile.get(1).unwrap();
-                    let band_lbl = tile.get(3).unwrap();
-                    for (a, b, c) in izip!(band_1, band_2, band_lbl) {
-                        reservoir_b1.push(a);
-                        reservoir_b2.push(b);
-                        reservoir_lbl.push(c);
+                    let band_target = tile.get(3).unwrap();
+                    for (b1, b2, target) in izip!(band_1, band_2, band_target) {
+                        reservoir_b1.push(b1);
+                        reservoir_b2.push(b2);
+                        reservoir_target.push(target);
+
+                        v.push(i);
                         i = i + 1;
                     }
                 } else {
@@ -482,11 +492,14 @@ mod tests {
                         let c = tile.get(3).unwrap().get(idx_this_tile).unwrap();
                         reservoir_b1.push(a);
                         reservoir_b2.push(b);
-                        reservoir_lbl.push(c);
+                        reservoir_target.push(c);
 
                         reservoir_b1.swap_remove(idx_swap_elem);
                         reservoir_b2.swap_remove(idx_swap_elem);
-                        reservoir_lbl.swap_remove(idx_swap_elem);
+                        reservoir_target.swap_remove(idx_swap_elem);
+
+                        v.push(i);
+                        v.swap_remove(idx_swap_elem);
 
                         let step = Uniform::new(0.0, 1.0);
                         let mut rng = rand::thread_rng();
@@ -531,7 +544,7 @@ mod tests {
 
             // set labels
             // TODO: make more generic
-            let lbls: Vec<f32> = reservoir_lbl.iter().map(|elem| **elem as f32).collect();
+            let lbls: Vec<f32> = reservoir_target.iter().map(|elem| **elem as f32).collect();
             xg_matrix.set_labels(lbls.as_slice()).unwrap();
 
             if booster_vec.len() == 0 {
@@ -591,7 +604,40 @@ mod tests {
                 // store the new booster instance
                 booster_vec.push(bst_updated);
             }
+            vec_of_vecs.push(v);
         }
+
+        let mut hm_idx: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut vv = Vec::new();
+
+        for v in vec_of_vecs.iter() {
+            for elem in v.iter() {
+                vv.push(elem);
+                // *hm_idx.entry(*elem).or_insert(0) += 1;
+            }
+        }
+
+        // serialize hashmap to csv
+        let mut wtr = csv::Writer::from_path(Path::new("test.csv")).unwrap();
+
+        wtr.write_record(&["index"]).unwrap();
+
+        for elem in vv.iter() {
+            let val = format!("{elem}");
+            wtr.write_record(&[val]).unwrap();
+        }
+
+        // for (k, v) in hm_idx.into_iter() {
+        // for (k, v) in hm_idx.into_iter() {
+        //     let key = format!("{k}");
+        //     let value = format!("{v}");
+        //     wtr.write_record(&[key, value]).unwrap();
+        // }
+
+        wtr.flush().unwrap();
+
+        println!("{:?} vecs", vec_of_vecs.len());
+        println!("with {:?} elements", vec_of_vecs.get(0).unwrap().len());
         println!("training done");
     }
 }
