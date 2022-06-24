@@ -403,47 +403,54 @@ mod tests {
         println!("training done.");
     }
 
-    fn calculate_reservoir_size(max_mem_cap: usize, magnitude: &str, paths: &[&str], type_size: usize) -> usize {
-        let band_count = paths.len();
-
-        let factor = match magnitude.to_lowercase().as_str() {
+    /// This function calculates the maximum possible reservoir size for the given parameters.
+    /// # Arguments
+    /// max_mem_cap: How big the maximum memory capacity can be (in given unit).
+    /// unit: What the unit of the mem cap is. -> Megabytes etc.
+    /// n_bands: How many bands are read.
+    /// type_size: The size of the elements in the bands.
+    /// types: A vector of type sizes. Contains information if bands are of different types. TODO
+    fn calculate_reservoir_size(
+        max_mem_cap: usize,
+        unit: &str,
+        n_bands: usize,
+        type_size: usize,
+        types: Option<Vec<usize>>,
+    ) -> usize {
+        // TODO: @param types implementieren
+        let factor = match unit.to_lowercase().as_str() {
             "kb" => 1024,
             "mb" => 1024 * 1024,
             "gb" => 1024 * 1024 * 1024,
-            _ => 1
+            _ => 1,
         };
 
-        let n_bytes_per_band = (max_mem_cap * factor) / band_count;
+        let n_bytes_per_band = (max_mem_cap * factor) / n_bands;
         let n_elements_per_band = n_bytes_per_band / type_size;
 
-        println!("possible reservoir size is {:?} elements (per band)", n_elements_per_band);
+        println!(
+            "possible reservoir size is {:?} elements (per band)",
+            n_elements_per_band
+        );
 
         n_elements_per_band
     }
 
     #[test]
     fn mem_size_test() {
-        let paths = [
-            "raster/landcover/B2_2014-01-01.tif",
-            "raster/landcover/B3_2014-01-01.tif",
-            "raster/landcover/B4_2014-01-01.tif",
-            "raster/landcover/Class_ID_2014-01-01.tif",
-        ];
-        calculate_reservoir_size(1, "kb", &paths, mem::size_of::<f64>());
+        calculate_reservoir_size(1, "kb", 4, mem::size_of::<f64>(), None);
     }
 
     #[tokio::test]
     async fn xg_reservoir_test() {
-        // TODO: implement max. memory reservation
-        // TODO?: implement something to 'exhaust' available data on successive iterations
         let paths = [
             "raster/landcover/B2_2014-01-01.tif",
             "raster/landcover/B3_2014-01-01.tif",
             "raster/landcover/B4_2014-01-01.tif",
             "raster/landcover/Class_ID_2014-01-01.tif",
         ];
-        
-        let capacity = calculate_reservoir_size(1, "kb", &paths, mem::size_of::<f64>());
+
+        let capacity = calculate_reservoir_size(1, "kb", 4, mem::size_of::<f64>(), None);
 
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
