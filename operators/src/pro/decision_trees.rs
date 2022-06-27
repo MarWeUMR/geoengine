@@ -111,9 +111,10 @@ mod tests {
 
     async fn initialize_operator(
         gcm: GdalMetaDataRegular,
+        tile_size: usize,
     ) -> Box<dyn RasterQueryProcessor<RasterType = u8>> {
         let tiling_specification =
-            TilingSpecification::new(Coordinate2D::default(), [16, 16].into());
+            TilingSpecification::new(Coordinate2D::default(), [tile_size, tile_size].into());
 
         let mut mc = MockExecutionContext::test_default();
         mc.tiling_specification = tiling_specification;
@@ -187,221 +188,221 @@ mod tests {
         buffer_proc
     }
 
-    #[tokio::test]
-    async fn xg_raster_input_test() {
-        let paths = [
-            "B2_2014-01-01.tif",
-            "B3_2014-01-01.tif",
-            "B4_2014-01-01.tif",
-            "LBL_2014-01-01.tif",
-        ];
-
-        // contains the vectors of all bands.
-        // each band consists of multiple rectangles
-        // each rectangle is represented by a vec of u8's
-        let mut bands: Vec<Vec<Vec<f64>>> = vec![];
-
-        // load each band given by distinct .tif files
-        for path in paths.iter() {
-            let gcm = get_gdal_config_metadata(path);
-            let init_op = initialize_operator(gcm).await;
-            let buffer_proc = get_band_data(init_op).await;
-            bands.push(buffer_proc);
-        }
-
-        // --------------------------------------
-        // just debug stuff
-
-        let b1 = bands.get(0).unwrap();
-        let b1_t1 = bands.get(0).unwrap().get(0).unwrap();
-        println!("{:?}", b1.len());
-        println!("{:?}", b1_t1.len());
-        for i in 0..10 {
-            println!("{:?}", b1_t1.get(i).unwrap());
-        }
-
-        // --------------------------------------
-
-        let stream_vec: Vec<_> = bands
-            .into_iter()
-            .map(|band| futures::stream::iter(band))
-            .collect();
-
-        let svz2 = StreamVectorZip::new(stream_vec);
-
-        let zipped_data: Vec<Vec<Vec<f64>>> = svz2.collect().await;
-
-        // temporary stores for updating xg's data per tile
-        let mut booster_vec: Vec<Booster> = Vec::new();
-        let mut matrix_vec: Vec<DMatrix> = Vec::new();
-
-        let tile_size = 16;
-
-        let mut reservoir: Vec<&Vec<Vec<f64>>> = Vec::new();
-        let capacity = 10;
-
-        let step = Uniform::new(0.0, 1.0);
-        let mut rng = rand::thread_rng();
-        let choice: f64 = step.sample(&mut rng);
-
-        let mut w = (choice.ln() / capacity as f64).exp();
-        // iterate over each tile, every time an instance of xgbooster is updated
-
-        let mut next_i = 10;
-
-        for (i, tile) in zipped_data.iter().enumerate() {
-            if i < 10 {
-                reservoir.push(tile);
-            } else if i == next_i {
-                println!("tile.len(): {:?}", tile.len());
-                println!("tile[0].len(): {:?}", tile.get(0).unwrap().len());
-                println!("\nTILE ---------------------------------\n");
-                println!("current i: {:?}", i);
-
-                let step = Uniform::new(0.0, 9.0);
-                let mut rng = rand::thread_rng();
-                let swap_elem_idx: f64 = step.sample(&mut rng);
-
-                reservoir.push(tile);
-                reservoir.swap_remove(swap_elem_idx as usize);
-                println!("reservoir len: {:?}", reservoir.len());
-
-                let step = Uniform::new(0.0, 1.0);
-                let mut rng = rand::thread_rng();
-                let choice: f64 = step.sample(&mut rng);
-
-                let s = (choice.ln() / (1.0 - w).ln()).floor();
-
-                let step = Uniform::new(0.0, 1.0);
-                let mut rng = rand::thread_rng();
-                let choice: f64 = step.sample(&mut rng);
-
-                w = w * (choice.ln() / capacity as f64).exp();
-
-                next_i = i + 1 + s as usize;
-
-                println!("next_i: {:?}", next_i);
-
-                let mut band_1 = Vec::new();
-                let mut band_2 = Vec::new();
-                let mut band_3 = Vec::new();
-                let mut band_4 = Vec::new();
-
-                // go over all tiles in the reservoir
-                // and make a collective band from all tiles
-                for tile in reservoir.iter() {
-                    for elem in tile.get(0).unwrap().iter() {
-                        band_1.push(elem);
-                    }
-                    for elem in tile.get(1).unwrap().iter() {
-                        band_2.push(elem);
-                    }
-                    for elem in tile.get(2).unwrap().iter() {
-                        band_3.push(elem);
-                    }
-                    for elem in tile.get(3).unwrap().iter() {
-                        band_4.push(elem);
-                    }
-                }
-
-                // we need all features (bands) per datapoint (row, coordinate etc)
-                let mut tabular_like_data_vec = Vec::new();
-                for (a, b, c) in izip!(band_1, band_2, band_3) {
-                    let row = vec![a.to_owned(), b.to_owned(), c.to_owned()];
-                    tabular_like_data_vec.extend_from_slice(&row);
-                }
-
-                let data_arr_2d = Array2::from_shape_vec(
-                    (i32::pow(tile_size, 2) as usize * 10, 3),
-                    tabular_like_data_vec,
-                )
-                .unwrap();
-
-                // prepare tecnical metadata for dmatrix
-                // xgboost needs the memory information of the data
-                let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-                let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-                let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-                let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
-
-                // get xgboost style matrices
-                let mut xg_matrix = DMatrix::from_col_major_f64(
-                    data_arr_2d.as_slice_memory_order().unwrap(),
-                    byte_size_ax_0,
-                    byte_size_ax_1,
-                    i32::pow(tile_size, 2) as usize,
-                    3 as usize,
-                )
-                .unwrap();
-
-                // set labels
-                // TODO: make more generic
-                let lbls: Vec<f32> = band_4.iter().map(|elem| **elem as f32).collect();
-                xg_matrix.set_labels(lbls.as_slice()).unwrap();
-
-                // start actual training
-                if booster_vec.len() == 0 {
-                    println!("generating initial model");
-
-                    // in the first iteration, there is no model yet.
-                    matrix_vec.push(xg_matrix);
-                    let keys = vec![
-                        "validate_parameters",
-                        "process_type",
-                        "tree_method",
-                        "eval_metric",
-                        "max_depth",
-                    ];
-
-                    let values = vec!["1", "default", "hist", "rmse", "3"];
-                    let evals = &[(matrix_vec.get(0).unwrap(), "train")];
-                    let bst = Booster::my_train(
-                        Some(evals),
-                        matrix_vec.get(0).unwrap(),
-                        keys,
-                        values,
-                        None, // <- No old model yet
-                    )
-                    .unwrap();
-
-                    // store the first booster
-                    booster_vec.push(bst);
-                } else {
-                    println!("updating model");
-
-                    // this is a consecutive iteration, so we need the last booster instance
-                    // to update the model
-                    let bst = booster_vec.pop().unwrap();
-
-                    let keys = vec![
-                        "validate_parameters",
-                        "process_type",
-                        "updater",
-                        "refresh_leaf",
-                        "eval_metric",
-                        "max_depth",
-                    ];
-
-                    let values = vec!["1", "update", "refresh", "true", "rmse", "3"];
-
-                    let evals = &[(matrix_vec.get(0).unwrap(), "orig"), (&xg_matrix, "train")];
-                    let bst_updated = Booster::my_train(
-                        Some(evals),
-                        &xg_matrix,
-                        keys,
-                        values,
-                        Some(bst), // <- this contains the last model which is now being updated
-                    )
-                    .unwrap();
-
-                    // store the new booster instance
-                    booster_vec.push(bst_updated);
-                }
-            }
-        }
-
-        println!("training done.");
-    }
+    // #[tokio::test]
+    // async fn xg_raster_input_test() {
+    //     let paths = [
+    //         "B2_2014-01-01.tif",
+    //         "B3_2014-01-01.tif",
+    //         "B4_2014-01-01.tif",
+    //         "LBL_2014-01-01.tif",
+    //     ];
+    //
+    //     // contains the vectors of all bands.
+    //     // each band consists of multiple rectangles
+    //     // each rectangle is represented by a vec of u8's
+    //     let mut bands: Vec<Vec<Vec<f64>>> = vec![];
+    //
+    //     // load each band given by distinct .tif files
+    //     for path in paths.iter() {
+    //         let gcm = get_gdal_config_metadata(path);
+    //         let init_op = initialize_operator(gcm, tile_size).await;
+    //         let buffer_proc = get_band_data(init_op).await;
+    //         bands.push(buffer_proc);
+    //     }
+    //
+    //     // --------------------------------------
+    //     // just debug stuff
+    //
+    //     let b1 = bands.get(0).unwrap();
+    //     let b1_t1 = bands.get(0).unwrap().get(0).unwrap();
+    //     println!("{:?}", b1.len());
+    //     println!("{:?}", b1_t1.len());
+    //     for i in 0..10 {
+    //         println!("{:?}", b1_t1.get(i).unwrap());
+    //     }
+    //
+    //     // --------------------------------------
+    //
+    //     let stream_vec: Vec<_> = bands
+    //         .into_iter()
+    //         .map(|band| futures::stream::iter(band))
+    //         .collect();
+    //
+    //     let svz2 = StreamVectorZip::new(stream_vec);
+    //
+    //     let zipped_data: Vec<Vec<Vec<f64>>> = svz2.collect().await;
+    //
+    //     // temporary stores for updating xg's data per tile
+    //     let mut booster_vec: Vec<Booster> = Vec::new();
+    //     let mut matrix_vec: Vec<DMatrix> = Vec::new();
+    //
+    //     let tile_size = 16;
+    //
+    //     let mut reservoir: Vec<&Vec<Vec<f64>>> = Vec::new();
+    //     let capacity = 10;
+    //
+    //     let step = Uniform::new(0.0, 1.0);
+    //     let mut rng = rand::thread_rng();
+    //     let choice: f64 = step.sample(&mut rng);
+    //
+    //     let mut w = (choice.ln() / capacity as f64).exp();
+    //     // iterate over each tile, every time an instance of xgbooster is updated
+    //
+    //     let mut next_i = 10;
+    //
+    //     for (i, tile) in zipped_data.iter().enumerate() {
+    //         if i < 10 {
+    //             reservoir.push(tile);
+    //         } else if i == next_i {
+    //             println!("tile.len(): {:?}", tile.len());
+    //             println!("tile[0].len(): {:?}", tile.get(0).unwrap().len());
+    //             println!("\nTILE ---------------------------------\n");
+    //             println!("current i: {:?}", i);
+    //
+    //             let step = Uniform::new(0.0, 9.0);
+    //             let mut rng = rand::thread_rng();
+    //             let swap_elem_idx: f64 = step.sample(&mut rng);
+    //
+    //             reservoir.push(tile);
+    //             reservoir.swap_remove(swap_elem_idx as usize);
+    //             println!("reservoir len: {:?}", reservoir.len());
+    //
+    //             let step = Uniform::new(0.0, 1.0);
+    //             let mut rng = rand::thread_rng();
+    //             let choice: f64 = step.sample(&mut rng);
+    //
+    //             let s = (choice.ln() / (1.0 - w).ln()).floor();
+    //
+    //             let step = Uniform::new(0.0, 1.0);
+    //             let mut rng = rand::thread_rng();
+    //             let choice: f64 = step.sample(&mut rng);
+    //
+    //             w = w * (choice.ln() / capacity as f64).exp();
+    //
+    //             next_i = i + 1 + s as usize;
+    //
+    //             println!("next_i: {:?}", next_i);
+    //
+    //             let mut band_1 = Vec::new();
+    //             let mut band_2 = Vec::new();
+    //             let mut band_3 = Vec::new();
+    //             let mut band_4 = Vec::new();
+    //
+    //             // go over all tiles in the reservoir
+    //             // and make a collective band from all tiles
+    //             for tile in reservoir.iter() {
+    //                 for elem in tile.get(0).unwrap().iter() {
+    //                     band_1.push(elem);
+    //                 }
+    //                 for elem in tile.get(1).unwrap().iter() {
+    //                     band_2.push(elem);
+    //                 }
+    //                 for elem in tile.get(2).unwrap().iter() {
+    //                     band_3.push(elem);
+    //                 }
+    //                 for elem in tile.get(3).unwrap().iter() {
+    //                     band_4.push(elem);
+    //                 }
+    //             }
+    //
+    //             // we need all features (bands) per datapoint (row, coordinate etc)
+    //             let mut tabular_like_data_vec = Vec::new();
+    //             for (a, b, c) in izip!(band_1, band_2, band_3) {
+    //                 let row = vec![a.to_owned(), b.to_owned(), c.to_owned()];
+    //                 tabular_like_data_vec.extend_from_slice(&row);
+    //             }
+    //
+    //             let data_arr_2d = Array2::from_shape_vec(
+    //                 (i32::pow(tile_size, 2) as usize * 10, 3),
+    //                 tabular_like_data_vec,
+    //             )
+    //             .unwrap();
+    //
+    //             // prepare tecnical metadata for dmatrix
+    //             // xgboost needs the memory information of the data
+    //             let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+    //             let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+    //             let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+    //             let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+    //
+    //             // get xgboost style matrices
+    //             let mut xg_matrix = DMatrix::from_col_major_f64(
+    //                 data_arr_2d.as_slice_memory_order().unwrap(),
+    //                 byte_size_ax_0,
+    //                 byte_size_ax_1,
+    //                 i32::pow(tile_size, 2) as usize,
+    //                 3 as usize,
+    //             )
+    //             .unwrap();
+    //
+    //             // set labels
+    //             // TODO: make more generic
+    //             let lbls: Vec<f32> = band_4.iter().map(|elem| **elem as f32).collect();
+    //             xg_matrix.set_labels(lbls.as_slice()).unwrap();
+    //
+    //             // start actual training
+    //             if booster_vec.len() == 0 {
+    //                 println!("generating initial model");
+    //
+    //                 // in the first iteration, there is no model yet.
+    //                 matrix_vec.push(xg_matrix);
+    //                 let keys = vec![
+    //                     "validate_parameters",
+    //                     "process_type",
+    //                     "tree_method",
+    //                     "eval_metric",
+    //                     "max_depth",
+    //                 ];
+    //
+    //                 let values = vec!["1", "default", "hist", "rmse", "3"];
+    //                 let evals = &[(matrix_vec.get(0).unwrap(), "train")];
+    //                 let bst = Booster::my_train(
+    //                     Some(evals),
+    //                     matrix_vec.get(0).unwrap(),
+    //                     keys,
+    //                     values,
+    //                     None, // <- No old model yet
+    //                 )
+    //                 .unwrap();
+    //
+    //                 // store the first booster
+    //                 booster_vec.push(bst);
+    //             } else {
+    //                 println!("updating model");
+    //
+    //                 // this is a consecutive iteration, so we need the last booster instance
+    //                 // to update the model
+    //                 let bst = booster_vec.pop().unwrap();
+    //
+    //                 let keys = vec![
+    //                     "validate_parameters",
+    //                     "process_type",
+    //                     "updater",
+    //                     "refresh_leaf",
+    //                     "eval_metric",
+    //                     "max_depth",
+    //                 ];
+    //
+    //                 let values = vec!["1", "update", "refresh", "true", "rmse", "3"];
+    //
+    //                 let evals = &[(matrix_vec.get(0).unwrap(), "orig"), (&xg_matrix, "train")];
+    //                 let bst_updated = Booster::my_train(
+    //                     Some(evals),
+    //                     &xg_matrix,
+    //                     keys,
+    //                     values,
+    //                     Some(bst), // <- this contains the last model which is now being updated
+    //                 )
+    //                 .unwrap();
+    //
+    //                 // store the new booster instance
+    //                 booster_vec.push(bst_updated);
+    //             }
+    //         }
+    //     }
+    //
+    //     println!("training done.");
+    // }
 
     /// This function calculates the maximum possible reservoir size for the given parameters.
     /// # Arguments
@@ -455,6 +456,7 @@ mod tests {
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
 
+        let tile_size = 16;
         let mut vec_of_reservoir_indices = vec![];
 
         for _ in 0..500 {
@@ -467,7 +469,7 @@ mod tests {
             // load each band given by distinct .tif files
             for path in paths.iter() {
                 let gcm = get_gdal_config_metadata(path);
-                let init_op = initialize_operator(gcm).await;
+                let init_op = initialize_operator(gcm, tile_size).await;
                 let buffer_proc = get_band_data(init_op).await;
                 bands.push(buffer_proc);
             }
@@ -480,8 +482,6 @@ mod tests {
             let svz2 = StreamVectorZip::new(stream_vec);
 
             let zipped_data: Vec<Vec<Vec<f64>>> = svz2.collect().await;
-
-            let tile_size = 16;
 
             let step = Uniform::new(0.0, 1.0);
             let mut rng = rand::thread_rng();
@@ -679,40 +679,42 @@ mod tests {
             "raster/landcover/Class_ID_2014-01-01.tif",
         ];
 
+        
         // define reservoir size
-        let capacity = calculate_reservoir_size(10, "kb", 4, mem::size_of::<f64>(), None);
+        let capacity = calculate_reservoir_size(1, "kb", 4, mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
         let training_rounds = 5;
+
+        // TODO: make this automatic
+        let tile_size = 64;
 
         // setup data/model cache
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
 
         // do geoengine magic
-        let zipped_data: Vec<Vec<Vec<f64>>> = get_zipped_data(&paths).await;
-
-        // TODO: make this automatic
-        let tile_size = 16;
+        let zipped_data: Vec<Vec<Vec<f64>>> = get_zipped_data(&paths, tile_size).await;
 
         for _ in 0..training_rounds {
-            // generate a reservoir
+            // generate and fill a reservoir
             let res = generate_reservoir(zipped_data.clone(), tile_size, capacity).await;
 
             // make xg compatible, trainable datastructure
-            let xg_matrix = make_xg_data(vec![res.0, res.1, res.2], capacity);
+            let xg_matrix = make_xg_data(res, capacity).await;
 
+            // start the training process
             train_model(&mut booster_vec, &mut matrix_vec, xg_matrix);
         }
     }
 
-    async fn get_zipped_data(paths: &[&str]) -> Vec<Vec<Vec<f64>>> {
+    async fn get_zipped_data(paths: &[&str], tile_size: usize) -> Vec<Vec<Vec<f64>>> {
         let mut bands: Vec<Vec<Vec<f64>>> = vec![];
 
         // load each band given by distinct .tif files
         for path in paths.iter() {
             let gcm = get_gdal_config_metadata(path);
-            let init_op = initialize_operator(gcm).await;
+            let init_op = initialize_operator(gcm, tile_size).await;
             let buffer_proc = get_band_data(init_op).await;
             bands.push(buffer_proc);
         }
@@ -794,14 +796,39 @@ mod tests {
         }
     }
 
-    fn make_xg_data(res: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
+    async fn make_xg_data(res: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
-        for (a, b) in izip!(res.get(0).unwrap(), res.get(1).unwrap()) {
-            let row = vec![a.to_owned(), b.to_owned()];
+
+        // -----------------------------------------
+        let stream_vec: Vec<_> = res.clone()
+            .into_iter()
+            .map(|band_reservoir| futures::stream::iter(band_reservoir))
+            .collect();
+
+        let svz2 = StreamVectorZip::new(stream_vec);
+
+        let mut zipped_data: Vec<_> = svz2.collect().await;
+
+        let n_cols = zipped_data.get(0).unwrap().len();
+
+        let mut y_vec = Vec::new();
+        for row in zipped_data.iter_mut() {
+            let y = row.pop().unwrap();
+            y_vec.push(y);
+            println!("\n------------------");
+            println!("{:?}", row);
+            println!("\n------------------");
+
             tabular_like_data_vec.extend_from_slice(&row);
         }
 
-        let data_arr_2d = Array2::from_shape_vec((capacity, 2), tabular_like_data_vec).unwrap();
+        // -----------------------------------------
+        // for (a, b) in izip!(res.get(0).unwrap(), res.get(1).unwrap()) {
+        //     let row = vec![a.to_owned(), b.to_owned()];
+        //     tabular_like_data_vec.extend_from_slice(&row);
+        // }
+
+        let data_arr_2d = Array2::from_shape_vec((capacity, n_cols-1), tabular_like_data_vec).unwrap();
 
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
@@ -814,15 +841,14 @@ mod tests {
             byte_size_ax_0,
             byte_size_ax_1,
             capacity,
-            2 as usize,
+            n_cols-1 as usize,
         )
         .unwrap();
 
         // set labels
         // TODO: make more generic
-        let lbls: Vec<f32> = res
-            .get(2)
-            .unwrap()
+        
+        let lbls: Vec<f32> = y_vec
             .iter()
             .map(|elem| *elem as f32)
             .collect();
@@ -834,11 +860,16 @@ mod tests {
         zipped_data: Vec<Vec<Vec<f64>>>,
         tile_size: usize,
         capacity: usize,
-    ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    ) -> Vec<Vec<f64>> {
         let mut i = 0;
-        let mut reservoir_b1: Vec<f64> = Vec::new();
-        let mut reservoir_b2: Vec<f64> = Vec::new();
-        let mut reservoir_target: Vec<f64> = Vec::new();
+
+        let num_of_bands = zipped_data.get(0).unwrap().len();
+
+        let mut vec_of_reservoirs = Vec::new();
+        for _ in 0..num_of_bands {
+            let band_reservoir: Vec<f64> = Vec::new();
+            vec_of_reservoirs.push(band_reservoir);
+        }
 
         let step = Uniform::new(0.0, 1.0);
         let mut rng = rand::thread_rng();
@@ -852,28 +883,29 @@ mod tests {
                 continue;
             }
 
-            let b1 = tile.get(0).unwrap();
-            let b2 = tile.get(1).unwrap();
-            let target = tile.get(3).unwrap();
+            let mut band_vec_within_tile = Vec::new();
+
+            for j in 0..num_of_bands {
+                let band = tile.get(j).unwrap();
+                band_vec_within_tile.push(band);
+            }
 
             // initial fill of the reservoir
             if i < capacity {
                 while i < capacity {
-                        println!("{}", i);
-                    
-                    if i >= (tile_counter+1) * (tile_size*tile_size) {
-                        println!("{}", i);
+                    // we need to "leave" this tile and go to the next. the index is not within this tile anymore.
+                    if i >= (tile_counter + 1) * (tile_size * tile_size) {
                         break;
                     }
 
-                    let idx = i - tile_counter * (tile_size*tile_size);
-                    
-                    let elem_b1 = b1.get(idx).unwrap();
-                    let elem_b2 = b2.get(idx).unwrap();
-                    let elem_target = target.get(idx).unwrap();
-                    reservoir_b1.push(elem_b1.to_owned());
-                    reservoir_b2.push(elem_b2.to_owned());
-                    reservoir_target.push(elem_target.to_owned());
+                    let idx = i - tile_counter * (tile_size * tile_size);
+
+                    for (j, res) in vec_of_reservoirs.iter_mut().enumerate() {
+                        let b = band_vec_within_tile.get(j).unwrap();
+                        let elem = b.get(idx).unwrap().to_owned();
+                        res.push(elem);
+                    }
+
                     i = i + 1;
                 }
             }
@@ -883,7 +915,7 @@ mod tests {
                 let mut rng = rand::thread_rng();
                 let idx_swap_elem = step.sample(&mut rng);
 
-                let mut idx_this_tile = 0;
+                let idx_this_tile;
                 // i is in the first tile
                 if i < (tile_size * tile_size) {
                     idx_this_tile = i;
@@ -893,19 +925,13 @@ mod tests {
                     idx_this_tile = i - (tile_counter * (tile_size * tile_size));
                 }
 
-                // change element
-                let a = tile.get(0).unwrap().get(idx_this_tile).unwrap();
-                let b = tile.get(1).unwrap().get(idx_this_tile).unwrap();
-                let c = tile.get(3).unwrap().get(idx_this_tile).unwrap();
-                reservoir_b1.push(a.to_owned());
-                reservoir_b2.push(b.to_owned());
-                reservoir_target.push(c.to_owned());
+                // change elements in the reservoir
 
-                let l = reservoir_b2.len();
-
-                reservoir_b1.swap_remove(idx_swap_elem);
-                reservoir_b2.swap_remove(idx_swap_elem);
-                reservoir_target.swap_remove(idx_swap_elem);
+                for (j, res) in vec_of_reservoirs.iter_mut().enumerate() {
+                    let b = tile.get(j).unwrap().get(idx_this_tile).unwrap().to_owned();
+                    res.push(b);
+                    res.swap_remove(idx_swap_elem);
+                }
 
                 // save indices to check distribution of reservoir elements
 
@@ -925,7 +951,7 @@ mod tests {
             }
         }
 
-        (reservoir_b1, reservoir_b2, reservoir_target)
+        vec_of_reservoirs
     }
 
     /// Is the i-th element in the j-th tile?
