@@ -6,3 +6,4 @@ FROM gitpod/workspace-rust:latest
 # install-packages is a wrapper for `apt` that helps skip a few commands in the docker env.
 RUN sudo install-packages clang gdal-bin libgdal-dev lld cmake sqlite3
 RUN bash -cl "rustup toolchain install nightly"
+RUN rustup default nightly
