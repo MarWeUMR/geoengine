@@ -5,3 +5,4 @@ FROM gitpod/workspace-rust:latest
 # base image only got `apt` as the package manager
 # install-packages is a wrapper for `apt` that helps skip a few commands in the docker env.
 RUN sudo install-packages clang gdal-bin libgdal-dev lld
+RUN bash -cl "rustup toolchain install nightly"
