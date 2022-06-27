@@ -437,11 +437,6 @@ mod tests {
         n_elements_per_band
     }
 
-    #[test]
-    fn mem_size_test() {
-        calculate_reservoir_size(1, "kb", 4, mem::size_of::<f64>(), None);
-    }
-
     #[tokio::test]
     async fn xg_reservoir_test() {
         let paths = [
@@ -679,24 +674,26 @@ mod tests {
             "raster/landcover/Class_ID_2014-01-01.tif",
         ];
 
-        
         // define reservoir size
-        let capacity = calculate_reservoir_size(1, "kb", 4, mem::size_of::<f64>(), None);
+        let capacity = calculate_reservoir_size(10, "kb", paths.len(), mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
         let training_rounds = 5;
 
-        // TODO: make this automatic
-        let tile_size = 64;
+        // needs to be a power of 2
+        // TODO: remove this parameter?
+        let tile_size = 128;
 
         // setup data/model cache
         let mut booster_vec: Vec<Booster> = Vec::new();
         let mut matrix_vec: Vec<DMatrix> = Vec::new();
 
         // do geoengine magic
-        let zipped_data: Vec<Vec<Vec<f64>>> = get_zipped_data(&paths, tile_size).await;
+        let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
 
         for _ in 0..training_rounds {
+            println!("training with a reservoir size of {:?}", capacity);
+
             // generate and fill a reservoir
             let res = generate_reservoir(zipped_data.clone(), tile_size, capacity).await;
 
@@ -708,7 +705,26 @@ mod tests {
         }
     }
 
-    async fn get_zipped_data(paths: &[&str], tile_size: usize) -> Vec<Vec<Vec<f64>>> {
+    /// This function takes a slice of paths to 'band_i.tif' files and turns them into a vector of zipped, tiled data.
+    /// Each band is tiled in the beginning. The elements per tile are then zipped together, such that a tabular style
+    /// result is returned.
+    /// The result contains all tiles of all bands of the provided data.
+    /// The structure looks like this:
+    /// Zipped_data[
+    ///     Tile_1[
+    ///        Band_1[elem1,...,elem_tilesize^2],
+    ///        ...,
+    ///        Band_n[elem1,...,elem_tilesize^2]
+    ///           ],
+    ///     ...,
+    ///    Tile_n[
+    ///        Band_1[elem1,...,elem_tilesize^2],
+    ///        ...,
+    ///        Band_n[elem1,...,elem_tilesize^2]
+    ///           ]
+    ///   ]
+
+    async fn zip_bands_to_tiles(paths: &[&str], tile_size: usize) -> Vec<Vec<Vec<f64>>> {
         let mut bands: Vec<Vec<Vec<f64>>> = vec![];
 
         // load each band given by distinct .tif files
@@ -719,15 +735,24 @@ mod tests {
             bands.push(buffer_proc);
         }
 
-        let stream_vec: Vec<_> = bands
+        let streamed_bands: Vec<_> = bands
             .into_iter()
             .map(|band| futures::stream::iter(band))
             .collect();
 
-        let svz2 = StreamVectorZip::new(stream_vec);
+        let zipped_bands = StreamVectorZip::new(streamed_bands);
 
-        let zipped_data: Vec<Vec<Vec<f64>>> = svz2.collect().await;
-        zipped_data
+        let tiles_of_zipped_bands: Vec<Vec<Vec<f64>>> = zipped_bands.collect().await;
+
+        let copy: Vec<_> = tiles_of_zipped_bands.iter().take(1).collect();
+
+        println!("zipped data: {:?}", copy);
+        println!("zipped data len: {:?}", copy.get(0).unwrap().len());
+        println!(
+            "zipped data len: {:?}",
+            copy.get(0).unwrap().get(0).unwrap().len()
+        );
+        tiles_of_zipped_bands
     }
 
     fn train_model(
@@ -796,11 +821,12 @@ mod tests {
         }
     }
 
-    async fn make_xg_data(res: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
+    /// NOTE: This function assumes, that the last column is the target.
+    async fn make_xg_data(reservoirs: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
 
-        // -----------------------------------------
-        let stream_vec: Vec<_> = res.clone()
+        let stream_vec: Vec<_> = reservoirs
+            .clone()
             .into_iter()
             .map(|band_reservoir| futures::stream::iter(band_reservoir))
             .collect();
@@ -815,20 +841,18 @@ mod tests {
         for row in zipped_data.iter_mut() {
             let y = row.pop().unwrap();
             y_vec.push(y);
-            println!("\n------------------");
-            println!("{:?}", row);
-            println!("\n------------------");
-
             tabular_like_data_vec.extend_from_slice(&row);
         }
 
-        // -----------------------------------------
-        // for (a, b) in izip!(res.get(0).unwrap(), res.get(1).unwrap()) {
-        //     let row = vec![a.to_owned(), b.to_owned()];
-        //     tabular_like_data_vec.extend_from_slice(&row);
-        // }
+        let data_arr_2d =
+            Array2::from_shape_vec((capacity, n_cols - 1), tabular_like_data_vec).unwrap();
 
-        let data_arr_2d = Array2::from_shape_vec((capacity, n_cols-1), tabular_like_data_vec).unwrap();
+        println!(
+            "data_arr_2d:{:?}\nwith length: {:?}",
+            data_arr_2d,
+            data_arr_2d.shape()
+        );
+        println!("y:{:?}\nwith length: {:?}", y_vec, y_vec.len());
 
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
@@ -841,17 +865,14 @@ mod tests {
             byte_size_ax_0,
             byte_size_ax_1,
             capacity,
-            n_cols-1 as usize,
+            n_cols - 1 as usize,
         )
         .unwrap();
 
         // set labels
         // TODO: make more generic
-        
-        let lbls: Vec<f32> = y_vec
-            .iter()
-            .map(|elem| *elem as f32)
-            .collect();
+
+        let lbls: Vec<f32> = y_vec.iter().map(|elem| *elem as f32).collect();
         xg_matrix.set_labels(lbls.as_slice()).unwrap();
         xg_matrix
     }
