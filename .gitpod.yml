@@ -9,6 +9,6 @@ tasks:
   - init: |
       rustup default nightly
       cargo build
-    command: cargo watch -x run
+    command: cargo watch -x test workflow -- --nocapture
 
 
