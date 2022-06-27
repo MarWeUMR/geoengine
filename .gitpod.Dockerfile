@@ -5,8 +5,8 @@ FROM gitpod/workspace-rust:latest
 # base image only got `apt` as the package manager
 # install-packages is a wrapper for `apt` that helps skip a few commands in the docker env.
 RUN sudo install-packages clang gdal-bin libgdal-dev lld cmake sqlite3 
-RUN rustup toolchain install nightly && rustup default nightly npm
-RUN sudo install-packages fzf ranger 
+RUN rustup toolchain install nightly && rustup default nightly
+RUN sudo install-packages fzf ranger npm
 
 # USE TO HAVE NVIM AVAILABLE DURING IMAGE BUILDING PROCESS
 RUN curl -LO https://github.com/neovim/neovim/releases/download/nightly/nvim.appimage
