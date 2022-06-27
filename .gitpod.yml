@@ -6,6 +6,7 @@ image:
   file: .gitpod.Dockerfile
 
 tasks:
+  - before: rustup default nightly
   - init: cargo build
     command: cargo watch -x run
 
