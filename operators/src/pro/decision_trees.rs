@@ -826,20 +826,20 @@ mod tests {
     async fn make_xg_data(reservoirs: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
 
-        let stream_vec: Vec<_> = reservoirs
+        let streamed_reservoirs: Vec<_> = reservoirs
             .clone()
             .into_iter()
             .map(|band_reservoir| futures::stream::iter(band_reservoir))
             .collect();
 
-        let svz2 = StreamVectorZip::new(stream_vec);
+        let streamed_reservoirs_vec = StreamVectorZip::new(streamed_reservoirs);
 
-        let mut zipped_data: Vec<_> = svz2.collect().await;
+        let mut rows: Vec<_> = streamed_reservoirs_vec.collect().await;
 
-        let n_cols = zipped_data.get(0).unwrap().len();
+        let n_cols = rows.get(0).unwrap().len();
 
         let mut target_vec = Vec::new();
-        for row in zipped_data.iter_mut() {
+        for row in rows.iter_mut() {
             let target_value = row.pop().unwrap();
             target_vec.push(target_value);
             tabular_like_data_vec.extend_from_slice(&row);
@@ -855,6 +855,7 @@ mod tests {
         );
         println!("y:{:?}\nwith length: {:?}", target_vec, target_vec.len());
 
+        // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
         let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
