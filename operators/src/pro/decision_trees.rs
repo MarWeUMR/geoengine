@@ -33,7 +33,7 @@ mod tests {
     };
     use geoengine_datatypes::{raster::RasterPropertiesEntryType, util::Identifier};
     use itertools::{izip, Itertools};
-    use ndarray::Array2;
+    use ndarray::{arr2, Array2};
     use rand::distributions::Uniform;
     use rand::prelude::Distribution;
     use xgboost_bindings::{Booster, DMatrix};
@@ -707,12 +707,7 @@ mod tests {
         // predict data
         // ...?
         // ...?
-
-
-
-
-
-
+        let predictions = predict(booster_vec.pop().unwrap());
     }
 
     /// This function takes a slice of paths to 'band_i.tif' files and turns them into a vector of zipped, tiled data.
@@ -778,13 +773,12 @@ mod tests {
             matrix_vec.push(xg_matrix);
 
             let mut initial_training_config: HashMap<&str, &str> = HashMap::new();
-            
+
             initial_training_config.insert("validate_parameters", "1");
             initial_training_config.insert("process_type", "default");
             initial_training_config.insert("tree_method", "hist");
             initial_training_config.insert("eval_metric", "rmse");
             initial_training_config.insert("max_depth", "3");
-
 
             let keys = vec![
                 "validate_parameters",
@@ -816,7 +810,7 @@ mod tests {
             let bst = booster_vec.pop().unwrap();
 
             let mut update_training_config: HashMap<&str, &str> = HashMap::new();
-            
+
             update_training_config.insert("validate_parameters", "1");
             update_training_config.insert("process_type", "update");
             update_training_config.insert("updater", "refresh");
@@ -997,5 +991,44 @@ mod tests {
         let mut rng = rand::thread_rng();
         let choice: f64 = step.sample(&mut rng);
         choice
+    }
+
+    fn predict(booster_model: Booster) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
+        let data_arr_2d = arr2(&[
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+        ]);
+
+        let target = vec![16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0];
+
+        // define information needed for xgboost
+        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+        // get xgboost style matrices
+        let mut xg_matrix = DMatrix::from_col_major_f64(
+            data_arr_2d.as_slice_memory_order().unwrap(),
+            byte_size_ax_0,
+            byte_size_ax_1,
+            10,
+            3 as usize,
+        )
+        .unwrap();
+
+        let lbls: Vec<f32> = target.iter().map(|elem| *elem as f32).collect();
+        xg_matrix.set_labels(lbls.as_slice()).unwrap();
+
+        let result = booster_model.predict(&xg_matrix);
+        result
     }
 }
