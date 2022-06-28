@@ -695,10 +695,10 @@ mod tests {
             println!("training with a reservoir size of {:?}", capacity);
 
             // generate and fill a reservoir
-            let res = generate_reservoir(zipped_data.clone(), tile_size, capacity).await;
+            let reservoirs = generate_reservoir(&zipped_data, tile_size, capacity).await;
 
             // make xg compatible, trainable datastructure
-            let xg_matrix = make_xg_data(res, capacity).await;
+            let xg_matrix = make_xg_data(reservoirs, capacity).await;
 
             // start the training process
             train_model(&mut booster_vec, &mut matrix_vec, xg_matrix);
@@ -822,6 +822,7 @@ mod tests {
     }
 
     /// NOTE: This function assumes, that the last column is the target.
+    // TODO: change to index argument?
     async fn make_xg_data(reservoirs: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
 
@@ -837,10 +838,10 @@ mod tests {
 
         let n_cols = zipped_data.get(0).unwrap().len();
 
-        let mut y_vec = Vec::new();
+        let mut target_vec = Vec::new();
         for row in zipped_data.iter_mut() {
-            let y = row.pop().unwrap();
-            y_vec.push(y);
+            let target_value = row.pop().unwrap();
+            target_vec.push(target_value);
             tabular_like_data_vec.extend_from_slice(&row);
         }
 
@@ -852,7 +853,7 @@ mod tests {
             data_arr_2d,
             data_arr_2d.shape()
         );
-        println!("y:{:?}\nwith length: {:?}", y_vec, y_vec.len());
+        println!("y:{:?}\nwith length: {:?}", target_vec, target_vec.len());
 
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
@@ -872,13 +873,13 @@ mod tests {
         // set labels
         // TODO: make more generic
 
-        let lbls: Vec<f32> = y_vec.iter().map(|elem| *elem as f32).collect();
+        let lbls: Vec<f32> = target_vec.iter().map(|elem| *elem as f32).collect();
         xg_matrix.set_labels(lbls.as_slice()).unwrap();
         xg_matrix
     }
 
     async fn generate_reservoir<'a>(
-        zipped_data: Vec<Vec<Vec<f64>>>,
+        zipped_data: &Vec<Vec<Vec<f64>>>,
         tile_size: usize,
         capacity: usize,
     ) -> Vec<Vec<f64>> {
@@ -886,17 +887,16 @@ mod tests {
 
         let num_of_bands = zipped_data.get(0).unwrap().len();
 
+        // we need a store for each band's reservoir
         let mut vec_of_reservoirs = Vec::new();
         for _ in 0..num_of_bands {
             let band_reservoir: Vec<f64> = Vec::new();
             vec_of_reservoirs.push(band_reservoir);
         }
 
-        let step = Uniform::new(0.0, 1.0);
-        let mut rng = rand::thread_rng();
-        let choice: f64 = step.sample(&mut rng);
+        let uniform_rand = generate_uniform_rng(0.0, 1.0);
 
-        let mut w = (choice.ln() / capacity as f64).exp();
+        let mut w = (uniform_rand.ln() / capacity as f64).exp();
 
         for (tile_counter, tile) in zipped_data.iter().enumerate() {
             // check if next element is in current tile or we can skip this tile
@@ -904,27 +904,22 @@ mod tests {
                 continue;
             }
 
-            let mut band_vec_within_tile = Vec::new();
-
-            for j in 0..num_of_bands {
-                let band = tile.get(j).unwrap();
-                band_vec_within_tile.push(band);
-            }
-
             // initial fill of the reservoir
             if i < capacity {
                 while i < capacity {
-                    // we need to "leave" this tile and go to the next. the index is not within this tile anymore.
+                    // we need to "leave" this tile and go to the next. the index exceeds this tile's bounds.
                     if i >= (tile_counter + 1) * (tile_size * tile_size) {
                         break;
                     }
 
+                    // define the index within the tile
                     let idx = i - tile_counter * (tile_size * tile_size);
 
-                    for (j, res) in vec_of_reservoirs.iter_mut().enumerate() {
-                        let b = band_vec_within_tile.get(j).unwrap();
-                        let elem = b.get(idx).unwrap().to_owned();
-                        res.push(elem);
+                    // fill the reservoirs with data
+                    for (j, reservoir) in vec_of_reservoirs.iter_mut().enumerate() {
+                        let band = tile.get(j).unwrap();
+                        let elem = band.get(idx).unwrap().to_owned();
+                        reservoir.push(elem);
                     }
 
                     i = i + 1;
@@ -936,39 +931,25 @@ mod tests {
                 let mut rng = rand::thread_rng();
                 let idx_swap_elem = step.sample(&mut rng);
 
-                let idx_this_tile;
-                // i is in the first tile
-                if i < (tile_size * tile_size) {
-                    idx_this_tile = i;
-                }
-                // i is not in the first tile
-                else {
-                    idx_this_tile = i - (tile_counter * (tile_size * tile_size));
-                }
+                let idx_this_tile = i - (tile_counter * (tile_size * tile_size));
 
                 // change elements in the reservoir
-
-                for (j, res) in vec_of_reservoirs.iter_mut().enumerate() {
-                    let b = tile.get(j).unwrap().get(idx_this_tile).unwrap().to_owned();
-                    res.push(b);
-                    res.swap_remove(idx_swap_elem);
+                for (j, reservoir) in vec_of_reservoirs.iter_mut().enumerate() {
+                    let next_band_element =
+                        tile.get(j).unwrap().get(idx_this_tile).unwrap().to_owned();
+                    reservoir.push(next_band_element);
+                    reservoir.swap_remove(idx_swap_elem);
                 }
 
-                // save indices to check distribution of reservoir elements
+                let uniform_rand = generate_uniform_rng(0.0, 1.0);
 
-                let step = Uniform::new(0.0, 1.0);
-                let mut rng = rand::thread_rng();
-                let choice: f64 = step.sample(&mut rng);
+                let rand_step = (uniform_rand.ln() / (1.0 - w).ln()).floor();
 
-                let s = (choice.ln() / (1.0 - w).ln()).floor();
+                let uniform_rand = generate_uniform_rng(0.0, 1.0);
 
-                let step = Uniform::new(0.0, 1.0);
-                let mut rng = rand::thread_rng();
-                let choice: f64 = step.sample(&mut rng);
+                w = w * (uniform_rand.ln() / capacity as f64).exp();
 
-                w = w * (choice.ln() / capacity as f64).exp();
-
-                i = i + 1 + s as usize;
+                i = i + 1 + rand_step as usize;
             }
         }
 
@@ -980,5 +961,12 @@ mod tests {
     fn elem_in_this_tile(i: usize, tile_counter: usize, tile_size: usize) -> bool {
         let result = i < (tile_counter + 1) * (tile_size * tile_size);
         result
+    }
+
+    fn generate_uniform_rng(from: f64, to: f64) -> f64 {
+        let step = Uniform::new(from, to);
+        let mut rng = rand::thread_rng();
+        let choice: f64 = step.sample(&mut rng);
+        choice
     }
 }
