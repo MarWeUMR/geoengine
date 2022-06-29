@@ -701,6 +701,7 @@ mod tests {
             let xg_matrix = make_xg_data(reservoirs, capacity).await;
 
             // start the training process
+            // TODO: num_rounds implementieren
             train_model(&mut booster_vec, &mut matrix_vec, xg_matrix);
         }
 
