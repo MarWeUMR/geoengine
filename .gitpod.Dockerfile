@@ -4,4 +4,4 @@ FROM gitpod/workspace-rust:latest
 # Install custom tools, runtime, etc.
 # base image only got `apt` as the package manager
 # install-packages is a wrapper for `apt` that helps skip a few commands in the docker env.
-RUN sudo install-packages fish
+RUN sudo install-packages fish clang gdal-bin libgdal-dev lld
