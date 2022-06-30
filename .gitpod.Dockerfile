@@ -30,6 +30,4 @@ RUN git clone https://github.com/MarWeUMR/fish
 RUN git clone --depth 1 https://github.com/wbthomason/packer.nvim\
   /home/gitpod/.local/share/nvim/site/pack/packer/start/packer.nvim
 
-
-
 cmd ["/usr/bin/fish", "curl -sS https://git.io/fisher | source && fisher install jorgebucaran/fisher"] 
