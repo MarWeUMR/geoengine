@@ -66,7 +66,7 @@ mod tests {
                     origin_coordinate: (474112.0, 5646336.0).into(),
                     x_pixel_size: 10.0,
                     y_pixel_size: -10.0,
-                }, 
+                },
                 width: 4864,
                 height: 3431,
                 file_not_found_handling: FileNotFoundHandling::NoData,
@@ -682,7 +682,7 @@ mod tests {
         ];
 
         // define reservoir size
-        let capacity = calculate_reservoir_size(1, "mb", paths.len(), mem::size_of::<f64>(), None);
+        let capacity = calculate_reservoir_size(10, "mb", paths.len(), mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
         let training_rounds = 5;
@@ -715,7 +715,9 @@ mod tests {
         // predict data
         // ...?
         // ...?
-        let predictions = predict(booster_vec.pop().unwrap());
+        let predictions = predict(booster_vec.pop().unwrap()).await;
+        println!("predictions: {:?}", predictions);
+        println!("done");
     }
 
     /// This function takes a slice of paths to 'band_i.tif' files and turns them into a vector of zipped, tiled data.
@@ -849,6 +851,59 @@ mod tests {
             // store the new booster instance
             booster_vec.push(bst_updated);
         }
+    }
+
+    async fn make_xg_data_no_labels(zipped_data: Vec<Vec<Vec<f64>>>, capacity: usize) -> DMatrix {
+        let mut tabular_like_data_vec = Vec::new();
+
+        for tile in zipped_data.iter() {
+            let b1 = tile.get(0).unwrap();
+            let b2 = tile.get(1).unwrap();
+            let b3 = tile.get(2).unwrap();
+            let b4 = tile.get(3).unwrap();
+
+            for i in 0..b1.len() {
+                let e1 = b1.get(i).unwrap();
+                let e2 = b2.get(i).unwrap();
+                let e3 = b3.get(i).unwrap();
+                let e4 = b4.get(i).unwrap();
+
+                let row = vec![e1.to_owned(), e2.to_owned(), e3.to_owned(), e4.to_owned()];
+                tabular_like_data_vec.extend_from_slice(&row);
+            }
+        }
+
+        println!("num of tiles: {:?}", zipped_data.len());
+        println!(
+            "tabular_like_data_vec len: {:?}",
+            tabular_like_data_vec.len()
+        );
+
+        let n_rows = tabular_like_data_vec.len() / 4;
+
+        let data_arr_2d =
+            Array2::from_shape_vec((n_rows as usize, 4), tabular_like_data_vec).unwrap();
+
+        // define information needed for xgboost
+        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+        // get xgboost style matrices
+        let mut xg_matrix = DMatrix::from_col_major_f64(
+            data_arr_2d.as_slice_memory_order().unwrap(),
+            byte_size_ax_0,
+            byte_size_ax_1,
+            capacity,
+            4 as usize,
+        )
+        .unwrap();
+
+        // set labels
+        // TODO: make more generic
+
+        xg_matrix
     }
 
     /// NOTE: This function assumes, that the last column is the target.
@@ -1001,42 +1056,33 @@ mod tests {
         choice
     }
 
-    fn predict(booster_model: Booster) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
-        let data_arr_2d = arr2(&[
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-            [1.0, 5.0, 10.0, 16.0],
-        ]);
+    async fn predict(booster_model: Booster) -> Result<Vec<f32>, xgboost_bindings::XGBError>   {
+        let paths = [
+            "s2_10m_de_marburg/b02.tiff",
+            "s2_10m_de_marburg/b03.tiff",
+            "s2_10m_de_marburg/b04.tiff",
+            "s2_10m_de_marburg/b08.tiff",
+        ];
 
-        let target = vec![16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0];
+        // define reservoir size
+        let capacity = calculate_reservoir_size(1, "mb", paths.len(), mem::size_of::<f64>(), None);
 
-        // define information needed for xgboost
-        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+        // how many rounds should be trained?
+        // needs to be a power of 2
+        // TODO: remove this parameter?
+        let tile_size = 512;
 
-        // get xgboost style matrices
-        let mut xg_matrix = DMatrix::from_col_major_f64(
-            data_arr_2d.as_slice_memory_order().unwrap(),
-            byte_size_ax_0,
-            byte_size_ax_1,
-            10,
-            3 as usize,
-        )
-        .unwrap();
+        // setup data/model cache
 
-        let lbls: Vec<f32> = target.iter().map(|elem| *elem as f32).collect();
-        xg_matrix.set_labels(lbls.as_slice()).unwrap();
+        // do geoengine magic
+        let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
+
+        // make xg compatible, trainable datastructure
+        let xg_matrix = make_xg_data_no_labels(zipped_data, capacity).await;
+
+        println!("xg_matrix: {:?}", &xg_matrix); 
 
         let result = booster_model.predict(&xg_matrix);
-        result
+        result  
     }
 }
