@@ -1,0 +1,63 @@
+{
+    "properties": {
+      "id": {
+        "type": "internal",
+        "datasetId": "e704ccfe-f5bf-4938-9c96-e217d010a2b3"
+      },
+      "name": "Sentinel-2 B03 10m de marburg",
+      "description": "Sentinel-2 B03 10m de marburg",
+      "sourceOperator": "GdalSource",
+      "provenance": {
+        "citation": "",
+        "license": "",
+        "uri": ""
+      }
+    },
+    "metaData": {
+      "type": "GdalMetaDataRegular",
+      "resultDescriptor": {
+        "dataType": "I16",
+        "spatialReference": "EPSG:32632",
+        "measurement": {
+          "type": "unitless"
+        },
+        "noDataValue": 0.0,
+        "time": {
+          "start": "2020-06-01T00:00:00.000Z",
+          "end": "2020-07-01T00:00:00.000Z"
+        },
+        "bbox": {
+          "upperLeftCoordinate": [474112, 5646336],
+          "lowerRightCoordinate": [522752, 5612032]
+        }
+      },
+      "params": {
+        "filePath": "test_data/s2_10m_de_marburg/s2_b03_10m_%_START_TIME_%__36days_mean_de_marburg.tiff",
+        "rasterbandChannel": 1,
+        "geoTransform": {
+          "originCoordinate": {
+            "x": 474112.00000000000000,
+            "y": 5646336.0000000000000
+          },
+          "xPixelSize": 10.0,
+          "yPixelSize": -10.0
+        },
+        "width": 4864,
+        "height": 3431,
+        "fileNotFoundHandling": "NoData",
+        "noDataValue": -1000.0
+      },
+      "timePlaceholders": {
+        "%_START_TIME_%": {
+          "format": "%Y_%m_%d",
+          "reference": "start"
+        }
+      },
+      "start": "2020-06-01T00:00:00.000Z",
+      "step": {
+        "granularity": "months",
+        "step": 1
+      }
+    }
+  }
+  
