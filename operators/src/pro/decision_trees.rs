@@ -63,12 +63,12 @@ mod tests {
                 file_path: PathBuf::from(test_data!(path)),
                 rasterband_channel: 1,
                 geo_transform: GdalDatasetGeoTransform {
-                    origin_coordinate: (677770.0, 4764070.0).into(),
+                    origin_coordinate: (474112.0, 5646336.0).into(),
                     x_pixel_size: 10.0,
                     y_pixel_size: -10.0,
-                },
-                width: 208,
-                height: 170,
+                }, 
+                width: 4864,
+                height: 3431,
                 file_not_found_handling: FileNotFoundHandling::NoData,
                 no_data_value,
                 properties_mapping: Some(vec![
@@ -151,16 +151,15 @@ mod tests {
         let ctx = MockQueryContext::test_default();
 
         let query_bbox = SpatialPartition2D::new(
-            (677770.000, 4764070.000).into(),
-            (679870.000, 4762370.000).into(),
+            (474112.000, 5646336.000).into(),
+            (522752.000, 5612026.000).into(),
         )
         .unwrap();
-
         let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
 
         let qry_rectangle = QueryRectangle {
             spatial_bounds: query_bbox,
-            time_interval: TimeInterval::new(1072936800000, 1072936800000).unwrap(),
+            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
             spatial_resolution: query_spatial_resolution,
         };
 
@@ -667,22 +666,30 @@ mod tests {
     #[tokio::test]
     async fn workflow() {
         // define data to be used
+        // let paths = [
+        //     "raster/landcover/B2_2014-01-01.tif",
+        //     "raster/landcover/B3_2014-01-01.tif",
+        //     "raster/landcover/B4_2014-01-01.tif",
+        //     "raster/landcover/Class_ID_2014-01-01.tif",
+        // ];
+
         let paths = [
-            "raster/landcover/B2_2014-01-01.tif",
-            "raster/landcover/B3_2014-01-01.tif",
-            "raster/landcover/B4_2014-01-01.tif",
-            "raster/landcover/Class_ID_2014-01-01.tif",
+            "s2_10m_de_marburg/b02.tiff",
+            "s2_10m_de_marburg/b03.tiff",
+            "s2_10m_de_marburg/b04.tiff",
+            "s2_10m_de_marburg/b08.tiff",
+            "s2_10m_de_marburg/target.tiff",
         ];
 
         // define reservoir size
-        let capacity = calculate_reservoir_size(10, "kb", paths.len(), mem::size_of::<f64>(), None);
+        let capacity = calculate_reservoir_size(1, "mb", paths.len(), mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
         let training_rounds = 5;
 
         // needs to be a power of 2
         // TODO: remove this parameter?
-        let tile_size = 128;
+        let tile_size = 512;
 
         // setup data/model cache
         let mut booster_vec: Vec<Booster> = Vec::new();
