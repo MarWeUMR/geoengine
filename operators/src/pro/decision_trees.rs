@@ -38,6 +38,7 @@ mod tests {
     use rand::prelude::Distribution;
     use xgboost_bindings::{Booster, DMatrix};
 
+    use std::cmp::Ordering;
     use std::collections::{BTreeMap, HashMap};
     use std::f64;
     use std::mem::{self, size_of};
@@ -685,7 +686,7 @@ mod tests {
         let capacity = calculate_reservoir_size(10, "mb", paths.len(), mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
-        let training_rounds = 5;
+        let training_rounds = 1;
 
         // needs to be a power of 2
         // TODO: remove this parameter?
@@ -698,6 +699,8 @@ mod tests {
         // do geoengine magic
         let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
 
+        let mut true_counts = HashMap::new();
+
         for _ in 0..training_rounds {
             println!("training with a reservoir size of {:?}", capacity);
 
@@ -705,7 +708,7 @@ mod tests {
             let reservoirs = generate_reservoir(&zipped_data, tile_size, capacity).await;
 
             // make xg compatible, trainable datastructure
-            let xg_matrix = make_xg_data(reservoirs, capacity).await;
+            let xg_matrix = make_xg_data(reservoirs, capacity, &mut true_counts).await;
 
             // start the training process
             // TODO: num_rounds implementieren
@@ -713,11 +716,16 @@ mod tests {
         }
 
         // predict data
-        // ...?
-        // ...?
-        let predictions = predict(booster_vec.pop().unwrap()).await.unwrap();
-        println!("predictions: {:?}", predictions.iter().take(10).collect::<Vec<_>>());
-        println!("predictions len: {:?}", predictions.len());
+        let mut predictions = predict(booster_vec.pop().unwrap()).await.unwrap();
+
+        let mut result = HashMap::new();
+
+        for item in predictions.iter() {
+            *result.entry(format!("{item}")).or_insert(0) += 1;
+        }
+
+        println!("{:?}", result);
+        println!("{:?}", true_counts);
         println!("done");
     }
 
@@ -780,10 +788,11 @@ mod tests {
             initial_training_config.insert("validate_parameters", "1");
             initial_training_config.insert("process_type", "default");
             initial_training_config.insert("tree_method", "hist");
-            initial_training_config.insert("eval_metric", "rmse");
-            initial_training_config.insert("max_depth", "3");
+            initial_training_config.insert("max_depth", "6");
+            initial_training_config.insert("objective", "multi:softmax");
+            initial_training_config.insert("num_class", "7");
+            initial_training_config.insert("eta", "0.5");
 
-            
             let evals = &[(matrix_vec.get(0).unwrap(), "train")];
             let bst = Booster::train(
                 Some(evals),
@@ -810,9 +819,9 @@ mod tests {
             update_training_config.insert("process_type", "update");
             update_training_config.insert("updater", "refresh");
             update_training_config.insert("refresh_leaf", "true");
-            update_training_config.insert("eval_metric", "rmse");
-            update_training_config.insert("max_depth", "3");
-
+            update_training_config.insert("objective", "multi:softmax");
+            update_training_config.insert("num_class", "7");
+            update_training_config.insert("max_depth", "6");
 
             let evals = &[(matrix_vec.get(0).unwrap(), "orig"), (&xg_matrix, "train")];
             let bst_updated = Booster::train(
@@ -828,7 +837,7 @@ mod tests {
         }
     }
 
-    async fn make_xg_data_no_labels(zipped_data: Vec<Vec<Vec<f64>>>, capacity: usize) -> DMatrix {
+    async fn make_xg_data_no_labels(zipped_data: Vec<Vec<Vec<f64>>>) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
 
         for tile in zipped_data.iter() {
@@ -847,14 +856,7 @@ mod tests {
                 tabular_like_data_vec.extend_from_slice(&row);
             }
         }
-
-        println!("num of tiles: {:?}", zipped_data.len());
-        println!(
-            "tabular_like_data_vec len: {:?}",
-            tabular_like_data_vec.len()
-        );
-
-        println!("tld: {:?}", tabular_like_data_vec.iter().take(10).collect::<Vec<_>>());
+        
 
         let n_rows = tabular_like_data_vec.len() / 4;
 
@@ -872,7 +874,7 @@ mod tests {
             data_arr_2d.as_slice_memory_order().unwrap(),
             byte_size_ax_0,
             byte_size_ax_1,
-            capacity,
+            512 * 512 * 77,
             4 as usize,
         )
         .unwrap();
@@ -885,7 +887,11 @@ mod tests {
 
     /// NOTE: This function assumes, that the last column is the target.
     // TODO: change to index argument?
-    async fn make_xg_data(reservoirs: Vec<Vec<f64>>, capacity: usize) -> DMatrix {
+    async fn make_xg_data(
+        reservoirs: Vec<Vec<f64>>,
+        capacity: usize,
+        true_counts: &mut HashMap<String, i32>,
+    ) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
 
         let streamed_reservoirs: Vec<_> = reservoirs
@@ -900,16 +906,40 @@ mod tests {
 
         let n_cols = rows.get(0).unwrap().len();
 
+        let mut targets_unique_counter = 0;
+        let mut target_hashmap = HashMap::new();
+
         let mut target_vec = Vec::new();
         for row in rows.iter_mut() {
             let target_value = row.pop().unwrap();
+
+            if target_hashmap.contains_key(format!("{target_value}").as_str()) == false {
+                target_hashmap.insert(format!("{target_value}"), targets_unique_counter);
+                targets_unique_counter += 1;
+            }
+
             target_vec.push(target_value);
             tabular_like_data_vec.extend_from_slice(&row);
         }
 
+        // we need to remap the target values to [0, num_classes) for xgboost.
+        // otherwise it cant perform multi-class classification.
+
+        println!("target vec: {:?}", target_hashmap);
+
+        let mut target_vec_remapped = Vec::new();
+        for target in target_vec.iter() {
+            let target_value = target_hashmap.get(format!("{target}").as_str()).unwrap();
+            target_vec_remapped.push(*target_value);
+            *true_counts.entry(format!("{target}")).or_insert(0) += 1;
+        }
+
+        
+
+        assert_eq!(target_vec_remapped.len(), target_vec.len());
+
         let data_arr_2d =
             Array2::from_shape_vec((capacity, n_cols - 1), tabular_like_data_vec).unwrap();
-
 
         // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
@@ -930,7 +960,10 @@ mod tests {
         // set labels
         // TODO: make more generic
 
-        let lbls: Vec<f32> = target_vec.iter().map(|elem| *elem as f32).collect();
+        let lbls: Vec<f32> = target_vec_remapped
+            .iter()
+            .map(|elem| *elem as f32)
+            .collect();
         xg_matrix.set_labels(lbls.as_slice()).unwrap();
         xg_matrix
     }
@@ -1027,7 +1060,7 @@ mod tests {
         choice
     }
 
-    async fn predict(booster_model: Booster) -> Result<Vec<f32>, xgboost_bindings::XGBError>   {
+    async fn predict(booster_model: Booster) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
         let paths = [
             "s2_10m_de_marburg/b02.tiff",
             "s2_10m_de_marburg/b03.tiff",
@@ -1036,7 +1069,6 @@ mod tests {
         ];
 
         // define reservoir size
-        let capacity = calculate_reservoir_size(1, "mb", paths.len(), mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
         // needs to be a power of 2
@@ -1048,16 +1080,146 @@ mod tests {
         // do geoengine magic
         let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
 
-        println!("zipped data: num of tiles {:?}", zipped_data.get(0).unwrap());
-        println!("zipped data: num of bands {:?}", zipped_data.len());
-        println!("zipped data: len of bands {:?}", zipped_data.get(0).unwrap().get(0).unwrap().len());
-
         // make xg compatible, trainable datastructure
-        let xg_matrix = make_xg_data_no_labels(zipped_data, capacity).await;
+        let xg_matrix = make_xg_data_no_labels(zipped_data).await;
 
-        println!("xg_matrix: {:?}", &xg_matrix); 
+        println!("xg_matrix: {:?}", &xg_matrix);
 
-        let result = booster_model.predict(&xg_matrix);
-        result  
+        let mut o: u64 = 0;
+        let shp = &[512 as u64 * 512 as u64, 4];
+        let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut o);
+        result
+    }
+
+    #[test]
+    fn xg_test() {
+        let data_arr_2d = arr2(&[
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+        ]);
+
+        let target_vec = arr2(&[
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+            [180.0],
+        ]);
+
+        // define information needed for xgboost
+        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+        // get xgboost style matrices
+        let mut xg_matrix = DMatrix::from_col_major_f64(
+            data_arr_2d.as_slice_memory_order().unwrap(),
+            byte_size_ax_0,
+            byte_size_ax_1,
+            20,
+            4,
+        )
+        .unwrap();
+
+        // set labels
+        // TODO: make more generic
+
+        let lbls: Vec<f32> = target_vec.iter().map(|elem| *elem as f32).collect();
+        xg_matrix.set_labels(lbls.as_slice()).unwrap();
+
+        // ------------------------------------------------------
+        // start training
+
+        let mut initial_training_config: HashMap<&str, &str> = HashMap::new();
+
+        initial_training_config.insert("validate_parameters", "1");
+        initial_training_config.insert("process_type", "default");
+        initial_training_config.insert("tree_method", "hist");
+        initial_training_config.insert("eval_metric", "rmse");
+        initial_training_config.insert("max_depth", "3");
+
+        let evals = &[(&xg_matrix, "train")];
+        let bst = Booster::train(
+            Some(evals),
+            &xg_matrix,
+            initial_training_config,
+            None, // <- No old model yet
+        )
+        .unwrap();
+
+        let test_data_arr_2d = arr2(&[
+            [1.0, 6.0, 10.0, 16.0],
+            [1.0, 4.0, 10.0, 16.0],
+            [1.0, 7.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 4.0, 10.0, 16.0],
+            [1.0, 6.0, 10.0, 16.0],
+            [1.0, 3.0, 10.0, 16.0],
+            [1.0, 4.0, 10.0, 16.0],
+            [1.0, 4.0, 10.0, 16.0],
+            [1.0, 8.0, 10.0, 16.0],
+            [1.0, 4.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 2.0, 10.0, 16.0],
+            [1.0, 5.0, 10.0, 16.0],
+            [1.0, 6.0, 10.0, 16.0],
+            [1.0, 4.0, 10.0, 16.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]);
+
+        let strides_ax_0 = test_data_arr_2d.strides()[0] as usize;
+        let strides_ax_1 = test_data_arr_2d.strides()[1] as usize;
+        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+        // get xgboost style matrices
+        let mut test_data = DMatrix::from_col_major_f64(
+            test_data_arr_2d.as_slice_memory_order().unwrap(),
+            byte_size_ax_0,
+            byte_size_ax_1,
+            20,
+            4,
+        )
+        .unwrap();
+
+        let result = bst.predict(&test_data).unwrap();
+        println!("result: {:?}", result);
     }
 }
