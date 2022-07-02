@@ -715,8 +715,9 @@ mod tests {
         // predict data
         // ...?
         // ...?
-        let predictions = predict(booster_vec.pop().unwrap()).await;
-        println!("predictions: {:?}", predictions);
+        let predictions = predict(booster_vec.pop().unwrap()).await.unwrap();
+        println!("predictions: {:?}", predictions.iter().take(10).collect::<Vec<_>>());
+        println!("predictions len: {:?}", predictions.len());
         println!("done");
     }
 
@@ -759,14 +760,6 @@ mod tests {
 
         let tiles_of_zipped_bands: Vec<Vec<Vec<f64>>> = zipped_bands.collect().await;
 
-        let copy: Vec<_> = tiles_of_zipped_bands.iter().take(1).collect();
-
-        println!("zipped data: {:?}", copy);
-        println!("zipped data len: {:?}", copy.get(0).unwrap().len());
-        println!(
-            "zipped data len: {:?}",
-            copy.get(0).unwrap().get(0).unwrap().len()
-        );
         tiles_of_zipped_bands
     }
 
@@ -790,15 +783,7 @@ mod tests {
             initial_training_config.insert("eval_metric", "rmse");
             initial_training_config.insert("max_depth", "3");
 
-            let keys = vec![
-                "validate_parameters",
-                "process_type",
-                "tree_method",
-                "eval_metric",
-                "max_depth",
-            ];
-
-            let values = vec!["1", "default", "hist", "rmse", "3"];
+            
             let evals = &[(matrix_vec.get(0).unwrap(), "train")];
             let bst = Booster::train(
                 Some(evals),
@@ -828,16 +813,6 @@ mod tests {
             update_training_config.insert("eval_metric", "rmse");
             update_training_config.insert("max_depth", "3");
 
-            let keys = vec![
-                "validate_parameters",
-                "process_type",
-                "updater",
-                "refresh_leaf",
-                "eval_metric",
-                "max_depth",
-            ];
-
-            let values = vec!["1", "update", "refresh", "true", "rmse", "3"];
 
             let evals = &[(matrix_vec.get(0).unwrap(), "orig"), (&xg_matrix, "train")];
             let bst_updated = Booster::train(
@@ -879,6 +854,8 @@ mod tests {
             tabular_like_data_vec.len()
         );
 
+        println!("tld: {:?}", tabular_like_data_vec.iter().take(10).collect::<Vec<_>>());
+
         let n_rows = tabular_like_data_vec.len() / 4;
 
         let data_arr_2d =
@@ -891,7 +868,7 @@ mod tests {
         let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
 
         // get xgboost style matrices
-        let mut xg_matrix = DMatrix::from_col_major_f64(
+        let xg_matrix = DMatrix::from_col_major_f64(
             data_arr_2d.as_slice_memory_order().unwrap(),
             byte_size_ax_0,
             byte_size_ax_1,
@@ -933,12 +910,6 @@ mod tests {
         let data_arr_2d =
             Array2::from_shape_vec((capacity, n_cols - 1), tabular_like_data_vec).unwrap();
 
-        println!(
-            "data_arr_2d:{:?}\nwith length: {:?}",
-            data_arr_2d,
-            data_arr_2d.shape()
-        );
-        println!("y:{:?}\nwith length: {:?}", target_vec, target_vec.len());
 
         // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
@@ -1076,6 +1047,10 @@ mod tests {
 
         // do geoengine magic
         let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
+
+        println!("zipped data: num of tiles {:?}", zipped_data.get(0).unwrap());
+        println!("zipped data: num of bands {:?}", zipped_data.len());
+        println!("zipped data: len of bands {:?}", zipped_data.get(0).unwrap().get(0).unwrap().len());
 
         // make xg compatible, trainable datastructure
         let xg_matrix = make_xg_data_no_labels(zipped_data, capacity).await;
