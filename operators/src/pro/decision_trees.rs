@@ -411,6 +411,7 @@ mod tests {
     /// n_bands: How many bands are read.
     /// type_size: The size of the elements in the bands.
     /// types: A vector of type sizes. Contains information if bands are of different types. TODO
+    //TODO: what if reservoir is bigger than dataset
     fn calculate_reservoir_size(
         max_mem_cap: usize,
         unit: &str,
@@ -682,8 +683,12 @@ mod tests {
             "s2_10m_de_marburg/target.tiff",
         ];
 
+        let target_path = ["s2_10m_de_marburg/target.tiff"];
+
         // define reservoir size
-        let capacity = calculate_reservoir_size(10, "mb", paths.len(), mem::size_of::<f64>(), None);
+        // TODO: bigger reservoir size than dataset
+        let capacity =
+            calculate_reservoir_size(10, "kb", paths.len() + 1, mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
         let training_rounds = 1;
@@ -698,6 +703,13 @@ mod tests {
 
         // do geoengine magic
         let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
+
+        let zipped_data_target: Vec<Vec<Vec<f64>>> =
+            zip_target_to_tiles(&target_path, tile_size).await;
+
+        let z: Vec<f64> = zipped_data_target.get(0).unwrap().into_iter().flatten().map(|elem| *elem).collect();
+
+        println!("{:?}", z.len());
 
         let mut forward_map = HashMap::new();
         let mut true_distribution_map = HashMap::new();
@@ -741,13 +753,37 @@ mod tests {
             *result.entry(format!("{x}")).or_insert(0) += 1;
         }
 
-        let count_b: BTreeMap<&i32, &String> = true_distribution_map.iter().map(|(k, v)| (v, k)).collect();
+        let count_b: BTreeMap<&i32, &String> =
+            true_distribution_map.iter().map(|(k, v)| (v, k)).collect();
 
         println!("true distribution: {:?}", count_b);
         println!("predicted distribution: {:?}", result);
         println!("forward map: {:?}", forward_map);
         println!("backward map: {:?}", backward_map);
         println!("done");
+    }
+
+    async fn zip_target_to_tiles(paths: &[&str], tile_size: usize) -> Vec<Vec<Vec<f64>>> {
+        let mut bands: Vec<Vec<Vec<f64>>> = vec![];
+
+        // load each band given by distinct .tif files
+        for path in paths.iter() {
+            let gcm = get_gdal_config_metadata(path);
+            let init_op = initialize_operator(gcm, tile_size).await;
+            let buffer_proc = get_band_data(init_op).await;
+            bands.push(buffer_proc);
+        }
+
+        let streamed_bands: Vec<_> = bands
+            .into_iter()
+            .map(|band| futures::stream::iter(band))
+            .collect();
+
+        let zipped_bands = StreamVectorZip::new(streamed_bands);
+
+        let tiles_of_zipped_bands: Vec<Vec<Vec<f64>>> = zipped_bands.collect().await;
+
+        tiles_of_zipped_bands
     }
 
     /// This function takes a slice of paths to 'band_i.tif' files and turns them into a vector of zipped, tiled data.
@@ -779,6 +815,31 @@ mod tests {
             let buffer_proc = get_band_data(init_op).await;
             bands.push(buffer_proc);
         }
+
+        // generate ndvi band
+        let mut ndvi: Vec<Vec<f64>> = Vec::new();
+
+        for tile in 0..bands.get(0).unwrap().len() {
+            let t_b4 = bands.get(2).unwrap().get(tile).unwrap();
+            let t_b8 = bands.get(3).unwrap().get(tile).unwrap();
+            let mut ndvi_tile = Vec::new();
+
+            // iterate over all zipped elements and calculate ndvi value
+            for i in 0..t_b4.len() {
+                let ndvi_val = (t_b4.get(i).unwrap() - t_b8.get(i).unwrap())
+                    / (t_b4.get(i).unwrap() + t_b8.get(i).unwrap());
+
+                if ndvi_val.is_nan() {
+                    ndvi_tile.push(0.0);
+                } else {
+                    ndvi_tile.push(ndvi_val);
+                }
+            }
+
+            ndvi.push(ndvi_tile);
+        }
+
+        bands.insert(0, ndvi);
 
         let streamed_bands: Vec<_> = bands
             .into_iter()
@@ -866,22 +927,30 @@ mod tests {
             let b2 = tile.get(1).unwrap();
             let b3 = tile.get(2).unwrap();
             let b4 = tile.get(3).unwrap();
+            let b5 = tile.get(4).unwrap();
 
             for i in 0..b1.len() {
                 let e1 = b1.get(i).unwrap();
                 let e2 = b2.get(i).unwrap();
                 let e3 = b3.get(i).unwrap();
                 let e4 = b4.get(i).unwrap();
+                let e5 = b5.get(i).unwrap();
 
-                let row = vec![e1.to_owned(), e2.to_owned(), e3.to_owned(), e4.to_owned()];
+                let row = vec![
+                    e1.to_owned(),
+                    e2.to_owned(),
+                    e3.to_owned(),
+                    e4.to_owned(),
+                    e5.to_owned(),
+                ];
                 tabular_like_data_vec.extend_from_slice(&row);
             }
         }
 
-        let n_rows = tabular_like_data_vec.len() / 4;
+        let n_rows = tabular_like_data_vec.len() / 5;
 
         let data_arr_2d =
-            Array2::from_shape_vec((n_rows as usize, 4), tabular_like_data_vec).unwrap();
+            Array2::from_shape_vec((n_rows as usize, 5), tabular_like_data_vec).unwrap();
 
         // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
@@ -895,7 +964,7 @@ mod tests {
             byte_size_ax_0,
             byte_size_ax_1,
             512 * 512 * 77,
-            4 as usize,
+            5 as usize,
         )
         .unwrap();
 
