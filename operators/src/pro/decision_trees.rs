@@ -699,7 +699,8 @@ mod tests {
         // do geoengine magic
         let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
 
-        let mut true_counts = HashMap::new();
+        let mut forward_map = HashMap::new();
+        let mut true_distribution_map = HashMap::new();
 
         for _ in 0..training_rounds {
             println!("training with a reservoir size of {:?}", capacity);
@@ -708,7 +709,13 @@ mod tests {
             let reservoirs = generate_reservoir(&zipped_data, tile_size, capacity).await;
 
             // make xg compatible, trainable datastructure
-            let xg_matrix = make_xg_data(reservoirs, capacity, &mut true_counts).await;
+            let xg_matrix = make_xg_data(
+                reservoirs,
+                capacity,
+                &mut forward_map,
+                &mut true_distribution_map,
+            )
+            .await;
 
             // start the training process
             // TODO: num_rounds implementieren
@@ -718,14 +725,28 @@ mod tests {
         // predict data
         let mut predictions = predict(booster_vec.pop().unwrap()).await.unwrap();
 
-        let mut result = HashMap::new();
+        // remap predictions to original data
+        // let mut remapped_predictions = Vec::new();
 
-        for item in predictions.iter() {
-            *result.entry(format!("{item}")).or_insert(0) += 1;
+        // create the backwards hashmap
+        let mut backward_map = HashMap::new();
+        for (key, value) in forward_map.iter() {
+            backward_map.insert(value, key);
         }
 
-        println!("{:?}", result);
-        println!("{:?}", true_counts);
+        // now count the predicted values
+        let mut result = HashMap::new();
+        for elem in predictions.iter() {
+            let x = backward_map.get(&(*elem as i32)).unwrap();
+            *result.entry(format!("{x}")).or_insert(0) += 1;
+        }
+
+        let count_b: BTreeMap<&i32, &String> = true_distribution_map.iter().map(|(k, v)| (v, k)).collect();
+
+        println!("true distribution: {:?}", count_b);
+        println!("predicted distribution: {:?}", result);
+        println!("forward map: {:?}", forward_map);
+        println!("backward map: {:?}", backward_map);
         println!("done");
     }
 
@@ -856,7 +877,6 @@ mod tests {
                 tabular_like_data_vec.extend_from_slice(&row);
             }
         }
-        
 
         let n_rows = tabular_like_data_vec.len() / 4;
 
@@ -890,7 +910,8 @@ mod tests {
     async fn make_xg_data(
         reservoirs: Vec<Vec<f64>>,
         capacity: usize,
-        true_counts: &mut HashMap<String, i32>,
+        forward_map: &mut HashMap<String, i32>,
+        true_distribution_map: &mut HashMap<String, i32>,
     ) -> DMatrix {
         let mut tabular_like_data_vec = Vec::new();
 
@@ -906,17 +927,21 @@ mod tests {
 
         let n_cols = rows.get(0).unwrap().len();
 
-        let mut targets_unique_counter = 0;
-        let mut target_hashmap = HashMap::new();
+        let mut class_counter = 0;
+        // let mut target_hashmap = HashMap::new();
 
         let mut target_vec = Vec::new();
         for row in rows.iter_mut() {
             let target_value = row.pop().unwrap();
 
-            if target_hashmap.contains_key(format!("{target_value}").as_str()) == false {
-                target_hashmap.insert(format!("{target_value}"), targets_unique_counter);
-                targets_unique_counter += 1;
+            if forward_map.contains_key(format!("{target_value}").as_str()) == false {
+                forward_map.insert(format!("{target_value}"), class_counter);
+                class_counter += 1;
             }
+
+            *true_distribution_map
+                .entry(format!("{target_value}"))
+                .or_insert(0) += 1;
 
             target_vec.push(target_value);
             tabular_like_data_vec.extend_from_slice(&row);
@@ -925,16 +950,14 @@ mod tests {
         // we need to remap the target values to [0, num_classes) for xgboost.
         // otherwise it cant perform multi-class classification.
 
-        println!("target vec: {:?}", target_hashmap);
+        // println!("target vec: {:?}", target_hashmap);
 
         let mut target_vec_remapped = Vec::new();
         for target in target_vec.iter() {
-            let target_value = target_hashmap.get(format!("{target}").as_str()).unwrap();
+            let target_value = forward_map.get(format!("{target}").as_str()).unwrap();
             target_vec_remapped.push(*target_value);
-            *true_counts.entry(format!("{target}")).or_insert(0) += 1;
+            // *true_counts.entry(format!("{target}")).or_insert(0) += 1;
         }
-
-        
 
         assert_eq!(target_vec_remapped.len(), target_vec.len());
 
@@ -964,7 +987,7 @@ mod tests {
             .iter()
             .map(|elem| *elem as f32)
             .collect();
-        xg_matrix.set_labels(lbls.as_slice()).unwrap();
+        xg_matrix.set_labels(lbls.as_slice()).unwrap(); // <- here we need the remapped target values
         xg_matrix
     }
 
