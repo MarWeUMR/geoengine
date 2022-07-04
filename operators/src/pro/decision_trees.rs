@@ -47,14 +47,14 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn get_gdal_config_metadata(path: &str) -> GdalMetaDataRegular {
-        let no_data_value = Some(1000.0);
+        let no_data_value = Some(-1000.0);
 
         let gdal_config_metadata = GdalMetaDataRegular {
             result_descriptor: RasterResultDescriptor {
                 data_type: RasterDataType::I16,
                 spatial_reference: SpatialReferenceOption::SpatialReference(SpatialReference::new(
                     SpatialReferenceAuthority::Epsg,
-                    32618,
+                    32632,
                 )),
                 measurement: Measurement::Classification {
                     measurement: "raw".into(),
@@ -246,11 +246,10 @@ mod tests {
 
         // define reservoir size
         // TODO: bigger reservoir size than dataset
-        let capacity =
-            calculate_reservoir_size(1, "mb", paths.len() + 1, mem::size_of::<f64>(), None);
+        let capacity = calculate_reservoir_size(1, "mb", paths.len(), mem::size_of::<f64>(), None);
 
         // how many rounds should be trained?
-        let training_rounds = 1;
+        let training_rounds = 2;
 
         // needs to be a power of 2
         // TODO: remove this parameter?
@@ -264,27 +263,14 @@ mod tests {
         println!("starting geoengine magic");
         let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
 
-        // this --vvvvvvvv-- is only debug purpose code ----------------------------
+        // extract the target band to analyze the unique classes.
         let zipped_data_target: Vec<f64> = zip_target_to_tiles(&target_path, tile_size).await;
-        // count unique occurrences of target values
-        let mut true_distribution_map: BTreeMap<String, i32> = BTreeMap::new();
-        let mut forward_map = BTreeMap::new();
-        let mut backward_map = BTreeMap::new();
-        let mut num_classes = 0;
-        for elem in zipped_data_target.iter() {
-            *true_distribution_map.entry(format!("{elem}")).or_insert(0) += 1;
 
-            if !forward_map.contains_key(&format!("{elem}")) {
-                forward_map.insert(format!("{elem}"), num_classes);
-                num_classes += 1;
-            }
-        }
+        // we need a forward map to help xg boost train the classification. The classes need to be in [0, n_classes).
+        // we need a backward map to give the predictions back in the original coding.
+        // true distribution is only to verify data after training.
 
-        for (key, value) in forward_map.iter() {
-            backward_map.insert(value, key);
-        }
-
-        // this --^^^^^^^^-- is only debug purpose code ----------------------------
+        let (forward_map, backward_map, true_distribution_map) = get_hashmaps(zipped_data_target);
 
         println!("training with a reservoir size of {:?}", capacity);
         for _ in 0..training_rounds {
@@ -302,7 +288,9 @@ mod tests {
         }
 
         // predict data
-        let mut predictions = predict(booster_vec.pop().unwrap()).await.unwrap();
+        let mut predictions = predict(booster_vec.pop().unwrap(), &zipped_data)
+            .await
+            .unwrap();
 
         // remap predictions to original data
         // let mut remapped_predictions = Vec::new();
@@ -332,9 +320,21 @@ mod tests {
         wtr.flush().unwrap();
 
         println!("done");
-        let f = -1000.0;
-        let ff = format!("{f}");
-        println!("{:?}", ff);
+
+        // sum hashmap values
+        let mut sum_predicted = 0;
+        for (_, value) in predicted_distribution_map {
+            sum_predicted += value;
+        }
+
+        // sum hashmap values of true distribution
+        let mut sum_true = 0;
+        for (_, value) in true_distribution_map {
+            sum_true += value;
+        }
+
+        println!("sum predicted: {:?}", sum_predicted);
+        println!("sum true: {:?}", sum_true);
     }
 
     /// Debug purpose method
@@ -551,6 +551,10 @@ mod tests {
             // split the target value, we dont want it for the training matrix as a column.
             let target_value = row.pop().unwrap();
 
+            if target_value.eq(&-1000.0) {
+                println!("target value is -1000.0");
+            }
+
             // now we need to check, if there is missing data here.
             // if that is the case, we pass a nan row
             // NOTE: this is a band-aid fix.
@@ -565,7 +569,6 @@ mod tests {
                 }
             }
 
-            
             target_vec.push(target_value);
             tabular_like_data_vec.extend_from_slice(&v);
         }
@@ -703,7 +706,10 @@ mod tests {
         choice
     }
 
-    async fn predict(booster_model: Booster) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
+    async fn predict(
+        booster_model: Booster,
+        z: &Vec<Vec<Vec<f64>>>,
+    ) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
         let paths = [
             "s2_10m_de_marburg/b02.tiff",
             "s2_10m_de_marburg/b03.tiff",
@@ -864,5 +870,32 @@ mod tests {
 
         let result = bst.predict(&test_data).unwrap();
         println!("result: {:?}", result);
+    }
+
+    fn get_hashmaps(
+        zipped_data_target: Vec<f64>,
+    ) -> (
+        BTreeMap<String, i32>,
+        BTreeMap<i32, String>,
+        BTreeMap<String, i32>,
+    ) {
+        let mut true_distribution_map: BTreeMap<String, i32> = BTreeMap::new();
+        let mut forward_map = BTreeMap::new();
+        let mut backward_map = BTreeMap::new();
+        let mut num_classes = 0;
+        for elem in zipped_data_target.iter() {
+            *true_distribution_map.entry(format!("{elem}")).or_insert(0) += 1;
+
+            if !forward_map.contains_key(&format!("{elem}")) {
+                forward_map.insert(format!("{elem}"), num_classes);
+                num_classes += 1;
+            }
+        }
+
+        for (key, value) in forward_map.iter() {
+            backward_map.insert(*value, key.clone().to_owned());
+        }
+
+        (forward_map, backward_map, true_distribution_map)
     }
 }
