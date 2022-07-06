@@ -227,13 +227,6 @@ mod tests {
     #[tokio::test]
     async fn workflow() {
         // define data to be used
-        // let paths = [
-        //     "raster/landcover/B2_2014-01-01.tif",
-        //     "raster/landcover/B3_2014-01-01.tif",
-        //     "raster/landcover/B4_2014-01-01.tif",
-        //     "raster/landcover/Class_ID_2014-01-01.tif",
-        // ];
-
         let paths = [
             "s2_10m_de_marburg/b02.tiff",
             "s2_10m_de_marburg/b03.tiff",
@@ -288,7 +281,7 @@ mod tests {
         }
 
         // predict data
-        let mut predictions = predict(booster_vec.pop().unwrap(), &zipped_data)
+        let predictions = predict(booster_vec.pop().unwrap(), &zipped_data)
             .await
             .unwrap();
 
@@ -321,20 +314,6 @@ mod tests {
 
         println!("done");
 
-        // sum hashmap values
-        let mut sum_predicted = 0;
-        for (_, value) in predicted_distribution_map {
-            sum_predicted += value;
-        }
-
-        // sum hashmap values of true distribution
-        let mut sum_true = 0;
-        for (_, value) in true_distribution_map {
-            sum_true += value;
-        }
-
-        println!("sum predicted: {:?}", sum_predicted);
-        println!("sum true: {:?}", sum_true);
     }
 
     /// Debug purpose method
