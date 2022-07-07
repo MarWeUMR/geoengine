@@ -1,23 +1,30 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{TryStreamExt, StreamExt};
-use geoengine_datatypes::primitives::{Measurement, SpatialPartition2D, RasterQueryRectangle};
-use geoengine_datatypes::raster::{RasterDataType, RasterPropertiesKey, Pixel, RasterTile2D, EmptyGrid, GridShapeAccess, Grid2D, GridSize, NoDataValue};
-use rayon::ThreadPool;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
+use geoengine_datatypes::primitives::{Measurement, RasterQueryRectangle, SpatialPartition2D};
+use geoengine_datatypes::raster::{
+    EmptyGrid, Grid2D, GridShapeAccess, GridSize, NoDataValue, Pixel, RasterDataType,
+    RasterPropertiesKey, RasterTile2D,
+};
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
+use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
-use futures::stream::BoxStream;
 
-use crate::util::Result;
+use crate::engine::{
+    ExecutionContext, InitializedRasterOperator, Operator, QueryContext, QueryProcessor,
+    RasterOperator, RasterQueryProcessor, RasterResultDescriptor, SingleRasterSource,
+    TypedRasterQueryProcessor,
+};
 use crate::error::Error;
-use crate::engine::{Operator, SingleRasterSource, RasterResultDescriptor, InitializedRasterOperator, RasterOperator, ExecutionContext, TypedRasterQueryProcessor, RasterQueryProcessor, QueryProcessor, QueryContext};
+use crate::util::Result;
 
 use RasterDataType::F32 as RasterOut;
 
-use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 use super::{new_offset_key, new_slope_key};
+use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
@@ -242,3 +249,99 @@ fn process_tile<P: Pixel>(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::engine::{
+        MockExecutionContext, MockQueryContext, QueryProcessor, RasterOperator,
+        RasterResultDescriptor, SingleRasterSource,
+    };
+    use crate::processing::meteosat::radiance::{Radiance, RadianceParams};
+    use crate::processing::meteosat::xgboost::{Xgboost, XgboostParams};
+    use crate::processing::meteosat::{
+        new_channel_key, new_offset_key, new_satellite_key, new_slope_key, test_util,
+    };
+    use crate::source::{
+        FileNotFoundHandling, GdalDatasetGeoTransform, GdalDatasetParameters, GdalMetaDataRegular,
+        GdalMetadataMapping, GdalSource, GdalSourceParameters, GdalSourceTimePlaceholder,
+        TimeReference,
+    };
+    use crate::util::Result;
+    use geoengine_datatypes::dataset::{DatasetId, InternalDatasetId};
+    use geoengine_datatypes::primitives::{
+        Coordinate2D, Measurement, QueryRectangle, RasterQueryRectangle, SpatialPartition2D,
+        SpatialResolution, TimeGranularity, TimeInstance, TimeInterval, TimeStep,
+    };
+    use geoengine_datatypes::raster::{
+        EmptyGrid2D, Grid2D, GridOrEmpty, RasterDataType, RasterPropertiesEntryType, RasterTile2D,
+        TilingSpecification,
+    };
+    use geoengine_datatypes::spatial_reference::{
+        SpatialReference, SpatialReferenceAuthority, SpatialReferenceOption,
+    };
+    use geoengine_datatypes::util::test::TestDefault;
+    use geoengine_datatypes::util::Identifier;
+    use geoengine_datatypes::{hashmap, test_data};
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_ok() {
+        let path = "s2_10m_de_marburg/target.tiff";
+
+        let no_data_value = Some(-1000.0);
+        let tiling_specification =
+            TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
+
+        let query_bbox = SpatialPartition2D::new(
+            (474112.000, 5646336.000).into(),
+            (522752.000, 5612026.000).into(),
+        )
+        .unwrap();
+        let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
+
+        let rqr = RasterQueryRectangle {
+            spatial_bounds: query_bbox,
+            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
+            spatial_resolution: query_spatial_resolution,
+        };
+
+        let result = test_util::process(
+            || {
+                let id = DatasetId::Internal {
+                    dataset_id: InternalDatasetId::new(),
+                };
+                let src = GdalSource {
+                    params: GdalSourceParameters {
+                        dataset: id.clone(),
+                    },
+                };
+
+                // let src = test_util::create_mock_source::<u8>(props, None, None);
+                RasterOperator::boxed(Xgboost {
+                    sources: SingleRasterSource {
+                        raster: src.boxed(),
+                    },
+                    params: XgboostParams {},
+                })
+            },
+            rqr,
+            &ctx,
+        )
+        .await;
+
+        let r = &result.as_ref().unwrap().grid_array;
+        println!("{:?}", result);
+
+        // assert!(geoengine_datatypes::util::test::eq_with_no_data(
+        //     &result.as_ref().unwrap().grid_array,
+        //     &Grid2D::new(
+        //         [3, 2].into(),
+        //         vec![13.0, 15.0, 17.0, 19.0, 21.0, no_data_value_option.unwrap()],
+        //         no_data_value_option,
+        //     )
+        //     .unwrap()
+        //     .into()
+        // ));
+    }
+}

@@ -1,10 +1,10 @@
 use geoengine_datatypes::raster::RasterPropertiesKey;
 
-pub mod xgboost;
 pub mod radiance;
 pub mod reflectance;
 mod satellite;
 pub mod temperature;
+pub mod xgboost;
 
 pub fn new_slope_key() -> RasterPropertiesKey {
     RasterPropertiesKey {
