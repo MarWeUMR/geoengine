@@ -8,6 +8,7 @@ FROM gitpod/workspace-rust:latest
 RUN sudo install-packages clang gdal-bin libgdal-dev lld cmake sqlite3 
 RUN rustup toolchain install nightly 
 RUN rustup default nightly
+RUN rustup component add rustfmt clippy
 RUN sudo install-packages fzf ranger npm fish
 
 # USE TO HAVE NVIM AVAILABLE DURING IMAGE BUILDING PROCESS
