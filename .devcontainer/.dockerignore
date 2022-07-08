@@ -1,0 +1,15 @@
+.dockerignore
+devcontainer.json
+docker-compose.yml
+Dockerfile
+README.md
+# Don't provide build directory to Docker context
+target
+services
+
+# Ignore dockerfiles themselves
+
+.git
+.github
+.gitignore
+*Dockerfile
