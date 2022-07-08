@@ -7,13 +7,14 @@
     // "service": "vscode",
     // "runServices": ["vscode"],
     // "shutdownAction": "stopCompose",
-    // "postCreateCommand": "~/.windows.sh",
+    // "postCreateCommand": "cargo test --package geoengine-operators --lib -- processing::meteosat::xgboost::tests::test_ok --exact --nocapture",
     "workspaceFolder": "/workspaces/geoengine",
     // "overrideCommand": "",
     "extensions": [
 		"rust-lang.rust-analyzer",
 		"tamasfe.even-better-toml",
-		"mutantdino.resourcemonitor"
+		"mutantdino.resourcemonitor",
+		"vadimcn.vscode-lldb"
 	],
     // "settings": {
     //     "files.eol": "\n",
