@@ -282,6 +282,7 @@ mod tests {
     use geoengine_datatypes::util::Identifier;
     use geoengine_datatypes::{hashmap, test_data};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_ok() {
@@ -291,7 +292,93 @@ mod tests {
         let tiling_specification =
             TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
 
-        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
+        let gdal_config_metadata = GdalMetaDataRegular {
+            result_descriptor: RasterResultDescriptor {
+                data_type: RasterDataType::I16,
+                spatial_reference: SpatialReferenceOption::SpatialReference(SpatialReference::new(
+                    SpatialReferenceAuthority::Epsg,
+                    32632,
+                )),
+                measurement: Measurement::Classification {
+                    measurement: "raw".into(),
+                    classes: hashmap!(0 => "Water Bodies".to_string()),
+                },
+                no_data_value,
+            },
+            params: GdalDatasetParameters {
+                file_path: PathBuf::from(test_data!(path)),
+                rasterband_channel: 1,
+                geo_transform: GdalDatasetGeoTransform {
+                    origin_coordinate: (474112.0, 5646336.0).into(),
+                    x_pixel_size: 10.0,
+                    y_pixel_size: -10.0,
+                },
+                width: 4864,
+                height: 3431,
+                file_not_found_handling: FileNotFoundHandling::NoData,
+                no_data_value,
+                properties_mapping: Some(vec![
+                    GdalMetadataMapping::identity(
+                        new_offset_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                    GdalMetadataMapping::identity(
+                        new_slope_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                    GdalMetadataMapping::identity(
+                        new_channel_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                    GdalMetadataMapping::identity(
+                        new_satellite_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                ]),
+                gdal_open_options: None,
+                gdal_config_options: None,
+            },
+            time_placeholders: hashmap! {
+                "%%%_TIME_FORMATED_%%%".to_string() => GdalSourceTimePlaceholder {
+                    format: "%Y/%m/%d/%Y%m%d_%H%M/H-000-MSG3__-MSG3________-IR_087___-000001___-%Y%m%d%H%M-C_".to_string(),
+                    reference: TimeReference::Start,
+
+                }
+            },
+            start: TimeInstance::from_millis(1072917000000).unwrap(),
+            step: TimeStep {
+                granularity: TimeGranularity::Minutes,
+                step: 15,
+            },
+        };
+
+        let mut ctx = MockExecutionContext::test_default();
+
+        let id = DatasetId::Internal {
+            dataset_id: InternalDatasetId::new(),
+        };
+
+        ctx.tiling_specification = tiling_specification;
+
+        ctx.add_meta_data(id.clone(), Box::new(gdal_config_metadata.clone()));
+
+        let op = Box::new(GdalSource {
+            params: GdalSourceParameters {
+                dataset: id.clone(),
+            },
+        });
+
+        let rqp_gt = op
+            .initialize(&ctx)
+            .await
+            .unwrap()
+            .query_processor()
+            .unwrap()
+            .get_i16()
+            .unwrap();
+
+        // now get the band data
+        let ctx = MockQueryContext::test_default();
 
         let query_bbox = SpatialPartition2D::new(
             (474112.000, 5646336.000).into(),
@@ -300,38 +387,34 @@ mod tests {
         .unwrap();
         let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
 
-        let rqr = RasterQueryRectangle {
+        let qry_rectangle = QueryRectangle {
             spatial_bounds: query_bbox,
             time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
             spatial_resolution: query_spatial_resolution,
         };
 
-        let result = test_util::process(
-            || {
-                let id = DatasetId::Internal {
-                    dataset_id: InternalDatasetId::new(),
-                };
-                let src = GdalSource {
-                    params: GdalSourceParameters {
-                        dataset: id.clone(),
-                    },
-                };
+        let mut stream = rqp_gt
+            .raster_query(qry_rectangle.clone(), &ctx)
+            .await
+            .unwrap();
 
-                // let src = test_util::create_mock_source::<u8>(props, None, None);
-                RasterOperator::boxed(Xgboost {
-                    sources: SingleRasterSource {
-                        raster: src.boxed(),
-                    },
-                    params: XgboostParams {},
-                })
-            },
-            rqr,
-            &ctx,
-        )
-        .await;
+        let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
 
-        let r = &result.as_ref().unwrap().grid_array;
-        println!("{:?}", result);
+        while let Some(processor) = stream.next().await {
+            match processor.unwrap().grid_array {
+                GridOrEmpty::Grid(processor) => {
+                    let data = &processor.data;
+                    // TODO: make more generic
+                    let data_mapped: Vec<f64> = data.into_iter().map(|elem| *elem as f64).collect();
+                    buffer_proc.push(data_mapped);
+                }
+                _ => {
+                    buffer_proc.push(vec![]);
+                }
+            }
+        }
+
+        // let mut result: Vec<Result<RasterTile2D<f32>>> = stream.collect().await;
 
         // assert!(geoengine_datatypes::util::test::eq_with_no_data(
         //     &result.as_ref().unwrap().grid_array,
