@@ -266,6 +266,7 @@ mod tests {
         TimeReference,
     };
     use crate::util::Result;
+    use futures::StreamExt;
     use geoengine_datatypes::dataset::{DatasetId, InternalDatasetId};
     use geoengine_datatypes::primitives::{
         Coordinate2D, Measurement, QueryRectangle, RasterQueryRectangle, SpatialPartition2D,
@@ -393,26 +394,26 @@ mod tests {
             spatial_resolution: query_spatial_resolution,
         };
 
-        let mut stream = rqp_gt
-            .raster_query(qry_rectangle.clone(), &ctx)
-            .await
-            .unwrap();
+        let mut stream = rqp_gt.query(qry_rectangle.clone(), &ctx).await.unwrap();
+        let a: Vec<_> = stream.collect().await;
+
+        println!("{:?}", a);
 
         let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
 
-        while let Some(processor) = stream.next().await {
-            match processor.unwrap().grid_array {
-                GridOrEmpty::Grid(processor) => {
-                    let data = &processor.data;
-                    // TODO: make more generic
-                    let data_mapped: Vec<f64> = data.into_iter().map(|elem| *elem as f64).collect();
-                    buffer_proc.push(data_mapped);
-                }
-                _ => {
-                    buffer_proc.push(vec![]);
-                }
-            }
-        }
+        // while let Some(processor) = stream.next().await {
+        //     match processor.unwrap().grid_array {
+        //         GridOrEmpty::Grid(processor) => {
+        //             let data = &processor.data;
+        //             // TODO: make more generic
+        //             let data_mapped: Vec<f64> = data.into_iter().map(|elem| *elem as f64).collect();
+        //             buffer_proc.push(data_mapped);
+        //         }
+        //         _ => {
+        //             buffer_proc.push(vec![]);
+        //         }
+        //     }
+        // }
 
         // let mut result: Vec<Result<RasterTile2D<f32>>> = stream.collect().await;
 
