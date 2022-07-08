@@ -397,7 +397,7 @@ mod tests {
         let mut stream = rqp_gt.query(qry_rectangle.clone(), &ctx).await.unwrap();
         let a: Vec<_> = stream.collect().await;
 
-        println!("{:?}", a);
+        println!("done");
 
         let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
 

@@ -14,18 +14,23 @@
 		"rust-lang.rust-analyzer",
 		"tamasfe.even-better-toml",
 		"mutantdino.resourcemonitor",
-		"vadimcn.vscode-lldb"
+		"vadimcn.vscode-lldb",
+		"asvetliakov.vscode-neovim",
+		"cometeer.spacemacs",
+		"serayuzgur.crates",
+		"hbenl.vscode-test-explorer",
+		"Swellaby.vscode-rust-test-adapter"
 	],
-    // "settings": {
+    "settings": {
     //     "files.eol": "\n",
-    //     "[rust]": {
-    //         "editor.defaultFormatter": "rust-lang.rust-analyzer",
-    //         "editor.formatOnSave": true
-    //     },
-    //     "remote.extensionKind": {
-    //         "ms-azuretools.vscode-docker": "workspace"
-    //     },
-    //     "editor.codeActionsOnSaveTimeout": 3000,
+        "[rust]": {
+            "editor.defaultFormatter": "rust-lang.rust-analyzer",
+            "editor.formatOnSave": true
+        },
+    //     
+        "editor.codeActionsOnSaveTimeout": 3000,
+    "resmon.show.disk": true,
+    "vscode-neovim.neovimExecutablePaths.linux": "/usr/bin/nvim"
     //     "rust-analyzer.serverPath": "/usr/local/bin/rust-analyzer"
-    // }
+    }
 }
