@@ -1,9 +1,0 @@
-image:
-  file: .gitpod.Dockerfile
-
-
-vscode:
-  extensions:
-    - usernamehw.errorlens
-    - vadimcn.vscode-lldb
-    - matklad.rust-analyzer
