@@ -16,3 +16,4 @@ vscode:
     - asvetliakov.vscode-neovim
     - tamasfe.even-better-toml
   
+    - aaron-bond.better-comments
