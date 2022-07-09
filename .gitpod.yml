@@ -1,0 +1,14 @@
+tasks:
+  - init: cargo build
+    command: cargo watch -x run
+
+vscode:
+  extensions:
+    - anwar.resourcemonitor
+    - tamasfe.even-better-toml
+    - serayuzgur.crates
+    - usernamehw.errorlens
+    - matklad.rust-analyzer
+    - Swellaby.vscode-rust-test-adapter
+    - vadimcn.vscode-lldb
+    - hbenl.vscode-test-explorer

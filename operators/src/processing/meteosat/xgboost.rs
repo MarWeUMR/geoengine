@@ -405,7 +405,7 @@ mod tests {
 
         let gg = Grid2D::new(shape, data, Some(-1000)).expect("raster creation must succeed");
 
-        // println!("{:?}", gg);
+        println!("{:?}", gg);
         println!("{:?}", gg.shape);
 
         let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
