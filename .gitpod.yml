@@ -3,7 +3,6 @@ tasks:
 
 vscode:
   extensions:
-    - anwar.resourcemonitor
     - tamasfe.even-better-toml
     - serayuzgur.crates
     - usernamehw.errorlens
@@ -11,3 +10,4 @@ vscode:
     - vadimcn.vscode-lldb
     - hbenl.vscode-test-explorer
     - Swellaby.vscode-rust-test-adapter
+    - hbenl.test-adapter-converter
