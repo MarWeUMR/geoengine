@@ -255,7 +255,6 @@ mod tests {
         MockExecutionContext, MockQueryContext, QueryProcessor, RasterOperator,
         RasterResultDescriptor, SingleRasterSource,
     };
-    use crate::processing::meteosat::radiance::{Radiance, RadianceParams};
     use crate::processing::meteosat::xgboost::{Xgboost, XgboostParams};
     use crate::processing::meteosat::{
         new_channel_key, new_offset_key, new_satellite_key, new_slope_key, test_util,
@@ -286,7 +285,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
-    async fn test_ok() {
+    async fn test_xg_ok() {
         let path = "s2_10m_de_marburg/target.tiff";
 
         let no_data_value = Some(-1000.0);
@@ -397,35 +396,8 @@ mod tests {
         let mut stream = rqp_gt.query(qry_rectangle.clone(), &ctx).await.unwrap();
         let a: Vec<_> = stream.collect().await;
 
-        println!("done");
+        println!("done...");
 
         let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
-
-        // while let Some(processor) = stream.next().await {
-        //     match processor.unwrap().grid_array {
-        //         GridOrEmpty::Grid(processor) => {
-        //             let data = &processor.data;
-        //             // TODO: make more generic
-        //             let data_mapped: Vec<f64> = data.into_iter().map(|elem| *elem as f64).collect();
-        //             buffer_proc.push(data_mapped);
-        //         }
-        //         _ => {
-        //             buffer_proc.push(vec![]);
-        //         }
-        //     }
-        // }
-
-        // let mut result: Vec<Result<RasterTile2D<f32>>> = stream.collect().await;
-
-        // assert!(geoengine_datatypes::util::test::eq_with_no_data(
-        //     &result.as_ref().unwrap().grid_array,
-        //     &Grid2D::new(
-        //         [3, 2].into(),
-        //         vec![13.0, 15.0, 17.0, 19.0, 21.0, no_data_value_option.unwrap()],
-        //         no_data_value_option,
-        //     )
-        //     .unwrap()
-        //     .into()
-        // ));
     }
 }
