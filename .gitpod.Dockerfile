@@ -1,4 +1,4 @@
-FROM gitpod/workspace-full:2022-07-09-12-00-00
+FROM gitpod/workspace-full:latest
 
 # Install custom tools, runtime, etc.
 RUN sudo install-packages gdal-bin libgdal-dev 
@@ -7,5 +7,5 @@ RUN chmod u+x nvim.appimage
 RUN ./nvim.appimage --appimage-extract
 RUN ./squashfs-root/AppRun --version
 
-RUN ln -s /squashfs-root/AppRun /usr/bin/nvim
+RUN sudo ln -s /squashfs-root/AppRun /usr/bin/nvim
 RUN rm nvim.appimage
