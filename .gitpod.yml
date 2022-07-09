@@ -1,9 +1,11 @@
 tasks:
   - init: cargo test --package geoengine-operators --lib -- processing::meteosat::xgboost::tests::test_xg_ok --exact --nocapture
 
+image:
+  file: .gitpod.Dockerfile
+
 vscode:
   extensions:
-    - tamasfe.even-better-toml
     - serayuzgur.crates
     - usernamehw.errorlens
     - matklad.rust-analyzer
@@ -12,3 +14,4 @@ vscode:
     - Swellaby.vscode-rust-test-adapter
     - hbenl.test-adapter-converter
     - asvetliakov.vscode-neovim
+    - tamasfe.even-better-toml
