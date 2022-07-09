@@ -30,9 +30,9 @@ use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 #[serde(rename_all = "camelCase")]
 pub struct XgboostParams {}
 
-pub type Xgboost = Operator<XgboostParams, SingleRasterSource>;
+pub type XgboostOperator = Operator<XgboostParams, SingleRasterSource>;
 
-pub struct InitializedXgboost {
+pub struct InitializedXgboostOperator {
     result_descriptor: RasterResultDescriptor,
     source: Box<dyn InitializedRasterOperator>,
 }
@@ -42,13 +42,12 @@ const OUT_NO_DATA_VALUE: PixelOut = PixelOut::NAN;
 
 #[typetag::serde]
 #[async_trait]
-impl RasterOperator for Xgboost {
+impl RasterOperator for XgboostOperator {
     async fn initialize(
         self: Box<Self>,
         context: &dyn ExecutionContext,
     ) -> Result<Box<dyn InitializedRasterOperator>> {
         let input = self.sources.raster.initialize(context).await?;
-
         let in_desc = input.result_descriptor();
 
         match &in_desc.measurement {
@@ -93,7 +92,7 @@ impl RasterOperator for Xgboost {
             no_data_value: Some(f64::from(OUT_NO_DATA_VALUE)),
         };
 
-        let initialized_operator = InitializedXgboost {
+        let initialized_operator = InitializedXgboostOperator {
             result_descriptor: out_desc,
             source: input,
         };
@@ -102,7 +101,7 @@ impl RasterOperator for Xgboost {
     }
 }
 
-impl InitializedRasterOperator for InitializedXgboost {
+impl InitializedRasterOperator for InitializedXgboostOperator {
     fn result_descriptor(&self) -> &RasterResultDescriptor {
         &self.result_descriptor
     }
@@ -255,7 +254,7 @@ mod tests {
         MockExecutionContext, MockQueryContext, QueryProcessor, RasterOperator,
         RasterResultDescriptor, SingleRasterSource,
     };
-    use crate::processing::meteosat::xgboost::{Xgboost, XgboostParams};
+    use crate::processing::meteosat::xgboost::{XgboostOperator, XgboostParams};
     use crate::processing::meteosat::{
         new_channel_key, new_offset_key, new_satellite_key, new_slope_key, test_util,
     };
@@ -272,8 +271,7 @@ mod tests {
         SpatialResolution, TimeGranularity, TimeInstance, TimeInterval, TimeStep,
     };
     use geoengine_datatypes::raster::{
-        EmptyGrid2D, Grid2D, GridOrEmpty, RasterDataType, RasterPropertiesEntryType, RasterTile2D,
-        TilingSpecification,
+        Grid2D, RasterDataType, RasterPropertiesEntryType, TilingSpecification,
     };
     use geoengine_datatypes::spatial_reference::{
         SpatialReference, SpatialReferenceAuthority, SpatialReferenceOption,
@@ -281,8 +279,116 @@ mod tests {
     use geoengine_datatypes::util::test::TestDefault;
     use geoengine_datatypes::util::Identifier;
     use geoengine_datatypes::{hashmap, test_data};
-    use std::collections::HashMap;
+
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn xg_op_test() {
+        let path = "s2_10m_de_marburg/target.tiff";
+        let no_data_value = Some(-1000.0);
+        let gcm = GdalMetaDataRegular {
+            result_descriptor: RasterResultDescriptor {
+                data_type: RasterDataType::I16,
+                spatial_reference: SpatialReferenceOption::SpatialReference(SpatialReference::new(
+                    SpatialReferenceAuthority::Epsg,
+                    32632,
+                )),
+                measurement: Measurement::Classification {
+                    measurement: "raw".into(),
+                    classes: hashmap!(0 => "Water Bodies".to_string()),
+                },
+                no_data_value,
+            },
+            params: GdalDatasetParameters {
+                file_path: PathBuf::from(test_data!(path)),
+                rasterband_channel: 1,
+                geo_transform: GdalDatasetGeoTransform {
+                    origin_coordinate: (474112.0, 5646336.0).into(),
+                    x_pixel_size: 10.0,
+                    y_pixel_size: -10.0,
+                },
+                width: 4864,
+                height: 3431,
+                file_not_found_handling: FileNotFoundHandling::NoData,
+                no_data_value,
+                properties_mapping: Some(vec![
+                    GdalMetadataMapping::identity(
+                        new_offset_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                    GdalMetadataMapping::identity(
+                        new_slope_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                    GdalMetadataMapping::identity(
+                        new_channel_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                    GdalMetadataMapping::identity(
+                        new_satellite_key(),
+                        RasterPropertiesEntryType::Number,
+                    ),
+                ]),
+                gdal_open_options: None,
+                gdal_config_options: None,
+            },
+            time_placeholders: hashmap! {
+                "%%%_TIME_FORMATED_%%%".to_string() => GdalSourceTimePlaceholder {
+                    format: "%Y/%m/%d/%Y%m%d_%H%M/H-000-MSG3__-MSG3________-IR_087___-000001___-%Y%m%d%H%M-C_".to_string(),
+                    reference: TimeReference::Start,
+
+                }
+            },
+            start: TimeInstance::from_millis(1072917000000).unwrap(),
+            step: TimeStep {
+                granularity: TimeGranularity::Minutes,
+                step: 15,
+            },
+        };
+        let tiling_specification =
+            TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
+        let id = DatasetId::Internal {
+            dataset_id: InternalDatasetId::new(),
+        };
+        let mut ctx = MockExecutionContext::test_default();
+        ctx.tiling_specification = tiling_specification;
+
+        ctx.add_meta_data(id.clone(), Box::new(gcm.clone()));
+
+        let query_bbox = SpatialPartition2D::new(
+            (474112.000, 5646336.000).into(),
+            (522752.000, 5612026.000).into(),
+        )
+        .unwrap();
+        let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
+
+        let qry_rectangle = RasterQueryRectangle {
+            spatial_bounds: query_bbox,
+            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
+            spatial_resolution: query_spatial_resolution,
+        };
+
+        let result = test_util::process(
+            || {
+                let props = test_util::create_properties(None, None, Some(11.0), Some(2.0));
+                let src = GdalSource {
+                    params: GdalSourceParameters { dataset: id },
+                };
+                RasterOperator::boxed(XgboostOperator {
+                    sources: SingleRasterSource {
+                        raster: src.boxed(),
+                    },
+                    params: XgboostParams {},
+                })
+            },
+            qry_rectangle,
+            &ctx,
+        )
+        .await;
+
+        let r = result.unwrap();
+        println!("{:?}", r);
+    }
 
     #[tokio::test]
     async fn test_xg_ok() {
@@ -405,8 +511,9 @@ mod tests {
 
         let gg = Grid2D::new(shape, data, Some(-1000)).expect("raster creation must succeed");
 
-        println!("{:?}", gg);
+        println!("{:?}", gg.data.len());
         println!("{:?}", gg.shape);
+        println!("{:?}", a.len());
 
         let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
     }
