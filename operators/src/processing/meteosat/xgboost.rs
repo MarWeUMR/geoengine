@@ -395,8 +395,18 @@ mod tests {
 
         let mut stream = rqp_gt.query(qry_rectangle.clone(), &ctx).await.unwrap();
         let a: Vec<_> = stream.collect().await;
+        let aa = a.get(0).unwrap();
 
-        println!("done...");
+        let aaa = aa.as_ref().unwrap();
+        let ga = aaa.grid_array.clone();
+        let gaa = ga.into_materialized_grid();
+        let shape = gaa.shape;
+        let data = gaa.data;
+
+        let gg = Grid2D::new(shape, data, Some(-1000)).expect("raster creation must succeed");
+
+        // println!("{:?}", gg);
+        println!("{:?}", gg.shape);
 
         let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
     }
