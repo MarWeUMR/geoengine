@@ -1,6 +1,5 @@
 tasks:
-  - init: cargo build
-    command: cargo watch -x run
+  - init: cargo test --package geoengine-operators --lib -- processing::meteosat:.xgboost::tests::test_xg_ok --exact --nocapture
 
 vscode:
   extensions:
@@ -9,6 +8,6 @@ vscode:
     - serayuzgur.crates
     - usernamehw.errorlens
     - matklad.rust-analyzer
-    - Swellaby.vscode-rust-test-adapter
     - vadimcn.vscode-lldb
     - hbenl.vscode-test-explorer
+    - Swellaby.vscode-rust-test-adapter
