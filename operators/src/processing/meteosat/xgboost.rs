@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
+use geoengine_datatypes::hashmap;
 use geoengine_datatypes::primitives::{Measurement, RasterQueryRectangle, SpatialPartition2D};
 use geoengine_datatypes::raster::{
     EmptyGrid, Grid2D, GridShapeAccess, GridSize, NoDataValue, Pixel, RasterDataType,
@@ -47,47 +48,19 @@ impl RasterOperator for XgboostOperator {
         self: Box<Self>,
         context: &dyn ExecutionContext,
     ) -> Result<Box<dyn InitializedRasterOperator>> {
+        let self_source = self.sources.clone();
+        let raster = self_source.raster;
+        let init_raster = raster.initialize(context).await.unwrap();
+
         let input = self.sources.raster.initialize(context).await?;
         let in_desc = input.result_descriptor();
-
-        match &in_desc.measurement {
-            Measurement::Continuous {
-                measurement: m,
-                unit: _,
-            } if m != "raw" => {
-                return Err(Error::InvalidMeasurement {
-                    expected: "raw".into(),
-                    found: m.clone(),
-                })
-            }
-            Measurement::Classification {
-                measurement: m,
-                classes: _,
-            } => {
-                return Err(Error::InvalidMeasurement {
-                    expected: "raw".into(),
-                    found: m.clone(),
-                })
-            }
-            Measurement::Unitless => {
-                return Err(Error::InvalidMeasurement {
-                    expected: "raw".into(),
-                    found: "unitless".into(),
-                })
-            }
-            // OK Case
-            Measurement::Continuous {
-                measurement: _,
-                unit: _,
-            } => {}
-        }
 
         let out_desc = RasterResultDescriptor {
             spatial_reference: in_desc.spatial_reference,
             data_type: RasterOut,
-            measurement: Measurement::Continuous {
-                measurement: "radiance".into(),
-                unit: Some("W·m^(-2)·sr^(-1)·cm^(-1)".into()),
+            measurement: Measurement::Classification {
+                measurement: "raw".into(),
+                classes: hashmap!(0 => "Water Bodies".to_string()),
             },
             no_data_value: Some(f64::from(OUT_NO_DATA_VALUE)),
         };
@@ -252,8 +225,9 @@ fn process_tile<P: Pixel>(
 mod tests {
     use crate::engine::{
         MockExecutionContext, MockQueryContext, QueryProcessor, RasterOperator,
-        RasterResultDescriptor, SingleRasterSource,
+        RasterQueryProcessor, RasterResultDescriptor, SingleRasterSource,
     };
+    use crate::mock::{MockRasterSource, MockRasterSourceParams};
     use crate::processing::meteosat::xgboost::{XgboostOperator, XgboostParams};
     use crate::processing::meteosat::{
         new_channel_key, new_offset_key, new_satellite_key, new_slope_key, test_util,
@@ -271,7 +245,7 @@ mod tests {
         SpatialResolution, TimeGranularity, TimeInstance, TimeInterval, TimeStep,
     };
     use geoengine_datatypes::raster::{
-        Grid2D, RasterDataType, RasterPropertiesEntryType, TilingSpecification,
+        Grid2D, GridOrEmpty, RasterDataType, RasterPropertiesEntryType, TilingSpecification,
     };
     use geoengine_datatypes::spatial_reference::{
         SpatialReference, SpatialReferenceAuthority, SpatialReferenceOption,
@@ -279,124 +253,12 @@ mod tests {
     use geoengine_datatypes::util::test::TestDefault;
     use geoengine_datatypes::util::Identifier;
     use geoengine_datatypes::{hashmap, test_data};
+    use num_traits::AsPrimitive;
 
     use std::path::PathBuf;
 
-    #[tokio::test]
-    async fn xg_op_test() {
-        let path = "s2_10m_de_marburg/target.tiff";
+    fn get_gdal_config_metadata(path: &str) -> GdalMetaDataRegular {
         let no_data_value = Some(-1000.0);
-        let gcm = GdalMetaDataRegular {
-            result_descriptor: RasterResultDescriptor {
-                data_type: RasterDataType::I16,
-                spatial_reference: SpatialReferenceOption::SpatialReference(SpatialReference::new(
-                    SpatialReferenceAuthority::Epsg,
-                    32632,
-                )),
-                measurement: Measurement::Classification {
-                    measurement: "raw".into(),
-                    classes: hashmap!(0 => "Water Bodies".to_string()),
-                },
-                no_data_value,
-            },
-            params: GdalDatasetParameters {
-                file_path: PathBuf::from(test_data!(path)),
-                rasterband_channel: 1,
-                geo_transform: GdalDatasetGeoTransform {
-                    origin_coordinate: (474112.0, 5646336.0).into(),
-                    x_pixel_size: 10.0,
-                    y_pixel_size: -10.0,
-                },
-                width: 4864,
-                height: 3431,
-                file_not_found_handling: FileNotFoundHandling::NoData,
-                no_data_value,
-                properties_mapping: Some(vec![
-                    GdalMetadataMapping::identity(
-                        new_offset_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                    GdalMetadataMapping::identity(
-                        new_slope_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                    GdalMetadataMapping::identity(
-                        new_channel_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                    GdalMetadataMapping::identity(
-                        new_satellite_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                ]),
-                gdal_open_options: None,
-                gdal_config_options: None,
-            },
-            time_placeholders: hashmap! {
-                "%%%_TIME_FORMATED_%%%".to_string() => GdalSourceTimePlaceholder {
-                    format: "%Y/%m/%d/%Y%m%d_%H%M/H-000-MSG3__-MSG3________-IR_087___-000001___-%Y%m%d%H%M-C_".to_string(),
-                    reference: TimeReference::Start,
-
-                }
-            },
-            start: TimeInstance::from_millis(1072917000000).unwrap(),
-            step: TimeStep {
-                granularity: TimeGranularity::Minutes,
-                step: 15,
-            },
-        };
-        let tiling_specification =
-            TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
-        let mut ctx = MockExecutionContext::test_default();
-        ctx.tiling_specification = tiling_specification;
-
-        ctx.add_meta_data(id.clone(), Box::new(gcm.clone()));
-
-        let query_bbox = SpatialPartition2D::new(
-            (474112.000, 5646336.000).into(),
-            (522752.000, 5612026.000).into(),
-        )
-        .unwrap();
-        let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
-
-        let qry_rectangle = RasterQueryRectangle {
-            spatial_bounds: query_bbox,
-            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
-            spatial_resolution: query_spatial_resolution,
-        };
-
-        let result = test_util::process(
-            || {
-                let props = test_util::create_properties(None, None, Some(11.0), Some(2.0));
-                let src = GdalSource {
-                    params: GdalSourceParameters { dataset: id },
-                };
-                RasterOperator::boxed(XgboostOperator {
-                    sources: SingleRasterSource {
-                        raster: src.boxed(),
-                    },
-                    params: XgboostParams {},
-                })
-            },
-            qry_rectangle,
-            &ctx,
-        )
-        .await;
-
-        let r = result.unwrap();
-        println!("{:?}", r);
-    }
-
-    #[tokio::test]
-    async fn test_xg_ok() {
-        let path = "s2_10m_de_marburg/target.tiff";
-
-        let no_data_value = Some(-1000.0);
-        let tiling_specification =
-            TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
 
         let gdal_config_metadata = GdalMetaDataRegular {
             result_descriptor: RasterResultDescriptor {
@@ -458,15 +320,22 @@ mod tests {
             },
         };
 
-        let mut ctx = MockExecutionContext::test_default();
+        gdal_config_metadata
+    }
+
+    async fn initialize_operator(
+        gcm: GdalMetaDataRegular,
+        tile_size: usize,
+    ) -> Box<dyn RasterQueryProcessor<RasterType = i16>> {
+        let tiling_specification =
+            TilingSpecification::new(Coordinate2D::default(), [tile_size, tile_size].into());
+
+        let mut mc = MockExecutionContext::test_default();
+        mc.tiling_specification = tiling_specification;
 
         let id = DatasetId::Internal {
             dataset_id: InternalDatasetId::new(),
         };
-
-        ctx.tiling_specification = tiling_specification;
-
-        ctx.add_meta_data(id.clone(), Box::new(gdal_config_metadata.clone()));
 
         let op = Box::new(GdalSource {
             params: GdalSourceParameters {
@@ -474,8 +343,12 @@ mod tests {
             },
         });
 
+        // let gcm = get_gdal_config_metadata();
+
+        mc.add_meta_data(id, Box::new(gcm.clone()));
+
         let rqp_gt = op
-            .initialize(&ctx)
+            .initialize(&mc)
             .await
             .unwrap()
             .query_processor()
@@ -483,7 +356,16 @@ mod tests {
             .get_i16()
             .unwrap();
 
-        // now get the band data
+        rqp_gt
+    }
+
+    async fn get_band_data(
+        rqp_gt: Box<dyn RasterQueryProcessor<RasterType = i16>>,
+    ) -> Vec<
+        geoengine_datatypes::raster::BaseTile<
+            GridOrEmpty<geoengine_datatypes::raster::GridShape<[usize; 2]>, i16>,
+        >,
+    > {
         let ctx = MockQueryContext::test_default();
 
         let query_bbox = SpatialPartition2D::new(
@@ -499,22 +381,96 @@ mod tests {
             spatial_resolution: query_spatial_resolution,
         };
 
-        let mut stream = rqp_gt.query(qry_rectangle.clone(), &ctx).await.unwrap();
-        let a: Vec<_> = stream.collect().await;
-        let aa = a.get(0).unwrap();
+        let mut stream = rqp_gt
+            .raster_query(qry_rectangle.clone(), &ctx)
+            .await
+            .unwrap();
 
-        let aaa = aa.as_ref().unwrap();
-        let ga = aaa.grid_array.clone();
-        let gaa = ga.into_materialized_grid();
-        let shape = gaa.shape;
-        let data = gaa.data;
+        let mut tile_buffer: Vec<_> = Vec::new();
 
-        let gg = Grid2D::new(shape, data, Some(-1000)).expect("raster creation must succeed");
+        while let Some(processor) = stream.next().await {
+            tile_buffer.push(processor.unwrap());
+        }
 
-        println!("{:?}", gg.data.len());
-        println!("{:?}", gg.shape);
-        println!("{:?}", a.len());
+        tile_buffer
+    }
 
-        let mut buffer_proc: Vec<Vec<f64>> = Vec::new();
+    async fn get_src(
+        gcm: GdalMetaDataRegular,
+    ) -> crate::engine::SourceOperator<MockRasterSourceParams<i16>> {
+        //let path = "s2_10m_de_marburg/target.tiff";
+        let init_op = initialize_operator(gcm, 512).await;
+        let tile_vec = get_band_data(init_op).await;
+
+        println!("n tiles: {:?}", tile_vec.len());
+
+        let measurement = Measurement::Classification {
+            measurement: "whyyy".into(),
+            classes: hashmap!(0 => "Water Bodies".to_string()),
+        };
+        let mrs = MockRasterSource {
+            params: MockRasterSourceParams {
+                data: tile_vec,
+                result_descriptor: RasterResultDescriptor {
+                    data_type: RasterDataType::I16,
+                    spatial_reference: SpatialReference::new(
+                        SpatialReferenceAuthority::Epsg,
+                        32632,
+                    )
+                    .into(),
+                    measurement: measurement,
+                    no_data_value: Some(-1000.0).map(AsPrimitive::as_),
+                },
+            },
+        };
+        mrs
+    }
+
+    #[tokio::test]
+    async fn xg_op_test() {
+        // !----------------------------------------------------
+        // TODO: irgendwie die mock raster source implementieren
+        // !----------------------------------------------------
+        let path = "s2_10m_de_marburg/target.tiff";
+        let gcm = get_gdal_config_metadata(path);
+
+        let tiling_specification =
+            TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
+        let id = DatasetId::Internal {
+            dataset_id: InternalDatasetId::new(),
+        };
+        let mut ctx = MockExecutionContext::test_default();
+        ctx.tiling_specification = tiling_specification;
+
+        ctx.add_meta_data(id.clone(), Box::new(gcm.clone()));
+
+        let query_bbox = SpatialPartition2D::new(
+            (474112.000, 5646336.000).into(),
+            (522752.000, 5612026.000).into(),
+        )
+        .unwrap();
+        let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
+
+        let qry_rectangle = RasterQueryRectangle {
+            spatial_bounds: query_bbox,
+            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
+            spatial_resolution: query_spatial_resolution,
+        };
+
+        let src_operator = get_src(gcm).await;
+
+        let xg = XgboostOperator {
+            params: XgboostParams {},
+            sources: SingleRasterSource {
+                raster: src_operator.boxed(),
+            },
+        };
+
+        let closure = || RasterOperator::boxed(xg);
+        let result = test_util::process(closure, qry_rectangle, &ctx).await;
+
+        println!("done");
+        let r = result.unwrap();
+        println!("{:?}", r);
     }
 }
