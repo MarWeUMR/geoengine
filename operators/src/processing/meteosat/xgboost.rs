@@ -1,41 +1,49 @@
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::SystemTime;
+use std::{mem, path};
 
+use crate::error;
+use crate::util::stream_zip::StreamVectorZip;
 use async_trait::async_trait;
-use futures::stream::BoxStream;
-use futures::{StreamExt, TryStreamExt};
+use futures::stream::{self, select_all, BoxStream};
+use futures::{future, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use geoengine_datatypes::hashmap;
 use geoengine_datatypes::primitives::{Measurement, RasterQueryRectangle, SpatialPartition2D};
 use geoengine_datatypes::raster::{
-    EmptyGrid, Grid2D, GridShapeAccess, GridSize, NoDataValue, Pixel, RasterDataType,
-    RasterPropertiesKey, RasterTile2D,
+    BaseTile, ConvertDataTypeParallel, EmptyGrid, Grid, Grid2D, GridOrEmpty, GridShape,
+    GridShapeAccess, GridSize, NoDataValue, Pixel, RasterDataType, RasterPropertiesKey,
+    RasterTile2D,
 };
+use ndarray::Array2;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
+use xgboost_bindings::{Booster, DMatrix};
 
 use crate::engine::{
-    ExecutionContext, InitializedRasterOperator, Operator, QueryContext, QueryProcessor,
-    RasterOperator, RasterQueryProcessor, RasterResultDescriptor, SingleRasterSource,
-    TypedRasterQueryProcessor,
+    ExecutionContext, InitializedRasterOperator, MultipleRasterSources, Operator, QueryContext,
+    QueryProcessor, RasterOperator, RasterQueryProcessor, RasterResultDescriptor,
+    SingleRasterSource, TypedRasterQueryProcessor,
 };
 use crate::error::Error;
 use crate::util::Result;
 
 use RasterDataType::F32 as RasterOut;
 
-use super::{new_offset_key, new_slope_key};
 use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct XgboostParams {}
 
-pub type XgboostOperator = Operator<XgboostParams, SingleRasterSource>;
+pub type XgboostOperator = Operator<XgboostParams, MultipleRasterSources>;
 
 pub struct InitializedXgboostOperator {
     result_descriptor: RasterResultDescriptor,
-    source: Box<dyn InitializedRasterOperator>,
+    sources: Vec<Box<dyn InitializedRasterOperator>>,
 }
 
 type PixelOut = f32;
@@ -49,10 +57,17 @@ impl RasterOperator for XgboostOperator {
         context: &dyn ExecutionContext,
     ) -> Result<Box<dyn InitializedRasterOperator>> {
         let self_source = self.sources.clone();
-        let raster = self_source.raster;
-        let init_raster = raster.initialize(context).await.unwrap();
+        let rasters = self_source.rasters;
 
-        let input = self.sources.raster.initialize(context).await?;
+        let init_rasters = future::try_join_all(
+            rasters
+                .iter()
+                .map(|raster| raster.clone().initialize(context)),
+        )
+        .await
+        .unwrap();
+
+        let input = init_rasters.get(0).unwrap().clone();
         let in_desc = input.result_descriptor();
 
         let out_desc = RasterResultDescriptor {
@@ -67,7 +82,7 @@ impl RasterOperator for XgboostOperator {
 
         let initialized_operator = InitializedXgboostOperator {
             result_descriptor: out_desc,
-            source: input,
+            sources: init_rasters,
         };
 
         Ok(initialized_operator.boxed())
@@ -80,40 +95,31 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
     }
 
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
-        let q = self.source.query_processor()?;
+        let vec_of_rqps = self
+            .sources
+            .iter()
+            .map(|init_raster| {
+                let typed_raster_processor = init_raster.query_processor().unwrap();
+                let boxed_raster_data = typed_raster_processor.get_i16().unwrap();
+                boxed_raster_data
+            })
+            .collect();
 
-        Ok(match q {
-            TypedRasterQueryProcessor::U8(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
+        let typed_rqp = match self.sources.first().unwrap().query_processor().unwrap() {
+            QueryProcessorOut(p) => QueryProcessorOut(Box::new(XgboostProcessor::new(vec_of_rqps))),
+            TypedRasterQueryProcessor::U8(_) => todo!(),
+            TypedRasterQueryProcessor::U16(_) => todo!(),
+            TypedRasterQueryProcessor::U32(_) => todo!(),
+            TypedRasterQueryProcessor::U64(_) => todo!(),
+            TypedRasterQueryProcessor::I8(_) => todo!(),
+            TypedRasterQueryProcessor::I16(_) => {
+                QueryProcessorOut(Box::new(XgboostProcessor::new(vec_of_rqps)))
             }
-            TypedRasterQueryProcessor::U16(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::U32(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::U64(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::I8(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::I16(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::I32(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::I64(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::F32(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-            TypedRasterQueryProcessor::F64(p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(p)))
-            }
-        })
+            TypedRasterQueryProcessor::I32(_) => todo!(),
+            TypedRasterQueryProcessor::I64(_) => todo!(),
+            TypedRasterQueryProcessor::F64(_) => todo!(),
+        };
+        Ok(typed_rqp)
     }
 }
 
@@ -121,9 +127,7 @@ struct XgboostProcessor<Q, P>
 where
     Q: RasterQueryProcessor<RasterType = P>,
 {
-    source: Q,
-    offset_key: RasterPropertiesKey,
-    slope_key: RasterPropertiesKey,
+    sources: Vec<Q>,
 }
 
 impl<Q, P> XgboostProcessor<Q, P>
@@ -131,14 +135,62 @@ where
     Q: RasterQueryProcessor<RasterType = P>,
     P: Pixel,
 {
-    pub fn new(source: Q) -> Self {
-        Self {
-            source,
-            offset_key: new_offset_key(),
-            slope_key: new_slope_key(),
-        }
+    pub fn new(sources: Vec<Q>) -> Self {
+        Self { sources }
     }
 
+    async fn process_tile_async2(
+        &self,
+        tiles: Vec<Vec<P>>,
+        pool: Arc<ThreadPool>,
+    ) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
+        let n_cols = tiles.len();
+        let n_rows = tiles.first().unwrap().len();
+
+        let mut data: Vec<f64> = Vec::new();
+        for i in 0..n_rows {
+            let mut row = Vec::new();
+            for c in 0..n_cols {
+                let val = tiles.get(c).unwrap().get(i).unwrap();
+                let v = (val).as_();
+                row.push(v);
+            }
+
+            data.extend_from_slice(&row);
+        }
+
+        let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), data).unwrap();
+
+        // define information needed for xgboost
+        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+        // get xgboost style matrices
+        let xg_matrix = DMatrix::from_col_major_f64(
+            data_arr_2d.as_slice_memory_order().unwrap(),
+            byte_size_ax_0,
+            byte_size_ax_1,
+            n_rows,
+            n_cols,
+        )
+        .unwrap();
+
+        let booster_model = Booster::load(path::Path::new("model.json")).unwrap();
+        let start = SystemTime::now();
+
+        let mut out_dim: u64 = 0;
+        let shp = &[n_rows as u64, n_cols as u64];
+        let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+        let end = SystemTime::now();
+        let duration = end.duration_since(start).unwrap();
+        println!("it took {} ms", duration.as_millis());
+
+        result
+    }
+
+    // apply xgboost model prediction here
     async fn process_tile_async(
         &self,
         tile: RasterTile2D<P>,
@@ -153,23 +205,77 @@ where
                 tile.properties,
             ));
         }
+        let grid_shape = tile.grid_shape();
 
-        let offset = tile.properties.number_property::<f32>(&self.offset_key)?;
-        let slope = tile.properties.number_property::<f32>(&self.slope_key)?;
         let mat_tile = tile.into_materialized_tile(); // NOTE: the tile is already materialized.
 
-        let rad_grid = crate::util::spawn_blocking(move || {
-            process_tile(&mat_tile.grid_array, offset, slope, &pool)
-        })
-        .await?;
+        let data_of_tile = mat_tile.grid_array.data;
+        let predicted_tile_data = self.predict(data_of_tile).unwrap();
+        let no_data = -1000.0;
+        let predicted_grid = Grid2D::new(grid_shape, predicted_tile_data, Some(no_data))
+            .expect("raster creation must succeed");
 
         Ok(RasterTile2D::new_with_properties(
             mat_tile.time,
             mat_tile.tile_position,
             mat_tile.global_geo_transform,
-            rad_grid.into(),
+            predicted_grid.into(),
             mat_tile.properties,
         ))
+    }
+
+    fn predict(&self, tile: Vec<P>) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
+        // make xg compatible, trainable datastructure
+        let xg_matrix = self.make_xg_data_no_labels(tile);
+
+        let booster_model = Booster::load(path::Path::new("model.json"))?;
+        let start = SystemTime::now();
+
+        let mut out_dim: u64 = 0;
+        let shp = &[(512 as u64 * 512 as u64), 1];
+        let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+        let end = SystemTime::now();
+        let duration = end.duration_since(start).unwrap();
+        println!("it took {} ms", duration.as_millis());
+        result
+    }
+
+    fn make_xg_data_no_labels(&self, tile: Vec<P>) -> DMatrix {
+        let mut tabular_like_data_vec = Vec::new();
+
+        for i in 0..tile.len() {
+            let e1 = tile.get(i).unwrap();
+
+            let row = vec![e1.to_owned().as_()];
+            tabular_like_data_vec.extend_from_slice(&row);
+        }
+
+        let n_cols = 1;
+        let n_rows = tabular_like_data_vec.len() / n_cols;
+
+        let data_arr_2d =
+            Array2::from_shape_vec((n_rows as usize, n_cols), tabular_like_data_vec).unwrap();
+
+        // define information needed for xgboost
+        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+        // get xgboost style matrices
+        let xg_matrix = DMatrix::from_col_major_f64(
+            data_arr_2d.as_slice_memory_order().unwrap(),
+            byte_size_ax_0,
+            byte_size_ax_1,
+            tile.len(),
+            n_cols as usize,
+        )
+        .unwrap();
+
+        // set labels
+        // TODO: make more generic
+
+        xg_matrix
     }
 }
 
@@ -187,10 +293,174 @@ where
         query: RasterQueryRectangle,
         ctx: &'a dyn QueryContext,
     ) -> Result<BoxStream<'a, Result<Self::Output>>> {
-        let src = self.source.query(query, ctx).await?;
-        let rs = src.and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
+        let mut buffer = Vec::new();
+
+        for band in self.sources.iter() {
+            let mut stream = band.query(query, ctx).await?;
+
+            buffer.push(stream);
+        }
+
+        let s = StreamVectorZip::new(buffer);
+
+        let stream_of_tiled_bands = s
+            .then(|x| async move {
+                let extracted_data_from_bands_in_tile: Vec<Vec<P>> = x
+                    .into_iter()
+                    .map(|t| {
+                        let tile = t.unwrap();
+                        let tt = tile.into_materialized_tile();
+                        let data = tt.grid_array.data;
+
+                        data
+                    })
+                    .collect();
+                extracted_data_from_bands_in_tile
+            })
+            .boxed();
+
+        let mut tiled_bands: Vec<_> = s.collect().await;
+        let tile_vec = tiled_bands.first().unwrap();
+        let tile_ref = tile_vec.first().unwrap().as_ref().unwrap();
+
+        let grid_shp = tile_ref.grid_shape();
+        let time = query.time_interval;
+        let tile_position = tile_ref.tile_position;
+        let global_geo_transform = tile_ref.global_geo_transform;
+        let properties = tile_ref.properties.clone();
+
+        let xxx = predict_tile_data(stream_of_tiled_bands).await;
+
+        let abc: Vec<_> = xxx
+            .into_iter()
+            .map(|tile| {
+                let no_data = -1000.0;
+                let predicted_grid = Grid2D::new(grid_shp, tile, Some(no_data))
+                    .expect("raster creation must succeed");
+
+                let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
+                    RasterTile2D::new_with_properties(
+                        time,
+                        tile_position,
+                        global_geo_transform,
+                        predicted_grid.into(),
+                        properties.clone(),
+                    );
+
+                Ok(rt)
+            })
+            .collect::<Vec<Result<_>>>();
+
+        // let kp: Vec<_> = tiled_bands
+        //     .into_iter()
+        //     .map(|tile_vec_result| {
+        //         let extracted_data_from_bands_in_tile: Vec<Vec<P>> = tile_vec_result
+        //             .into_iter()
+        //             .map(|t| {
+        //                 let tile = t.unwrap();
+        //                 let tt = tile.into_materialized_tile();
+        //                 let data = tt.grid_array.data;
+
+        //                 data
+        //             })
+        //             .collect();
+
+        //         futures::stream::iter(extracted_data_from_bands_in_tile)
+        //     })
+        //     .collect();
+
+        // let bands_of_first_tile = tiled_bands.pop().unwrap();
+
+        // let extracted_data_from_bands_in_tile: Vec<Vec<P>> = bands_of_first_tile
+        //     .into_iter()
+        //     .map(|t| {
+        //         let tile = t.unwrap();
+        //         let tt = tile.into_materialized_tile();
+        //         let data = tt.grid_array.data;
+
+        //         data
+        //     })
+        //     .collect();
+
+        // let predicted_tile_data = self
+        //     .process_tile_async2(extracted_data_from_bands_in_tile, ctx.thread_pool().clone())
+        //     .await
+        //     .unwrap();
+
+        // let no_data = -1000.0;
+        // let predicted_grid = Grid2D::new(grid_shp, predicted_tile_data, Some(no_data))
+        //     .expect("raster creation must succeed");
+
+        // let rt = RasterTile2D::new_with_properties(
+        //     time,
+        //     tile_position,
+        //     global_geo_transform,
+        //     predicted_grid.into(),
+        //     properties,
+        // );
+
+        let src1 = self.sources.get(0).unwrap().query(query, ctx).await?;
+        let src2 = self.sources.get(1).unwrap().query(query, ctx).await?;
+
+        // let src = self.sources.query(query, ctx).await?;
+        let rs =
+            src1.and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
         Ok(rs.boxed())
     }
+}
+
+async fn predict_tile_data<P: Pixel>(
+    stream_of_tiled_bands: Pin<Box<dyn Stream<Item = Vec<Vec<P>>> + Send>>,
+) -> Vec<Vec<f32>> {
+    let stream: Vec<_> = stream_of_tiled_bands.collect().await;
+
+    let x: Vec<_> = stream
+        .iter()
+        .map(|elem| {
+            let n_cols = elem.len();
+            let n_rows = elem.first().unwrap().len();
+
+            let mut data: Vec<f64> = Vec::new();
+            for i in 0..n_rows {
+                let mut row = Vec::new();
+                for c in 0..n_cols {
+                    let val = elem.get(c).unwrap().get(i).unwrap();
+                    let v = (val).as_();
+                    row.push(v);
+                }
+
+                data.extend_from_slice(&row);
+            }
+
+            let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), data).unwrap();
+
+            // define information needed for xgboost
+            let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+            let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+            let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+            let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+            // get xgboost style matrices
+            let xg_matrix = DMatrix::from_col_major_f64(
+                data_arr_2d.as_slice_memory_order().unwrap(),
+                byte_size_ax_0,
+                byte_size_ax_1,
+                n_rows,
+                n_cols,
+            )
+            .unwrap();
+
+            let booster_model = Booster::load(path::Path::new("model.json")).unwrap();
+            let start = SystemTime::now();
+
+            let mut out_dim: u64 = 0;
+            let shp = &[n_rows as u64, n_cols as u64];
+            let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+            result.unwrap()
+        })
+        .collect();
+
+    x
 }
 
 fn process_tile<P: Pixel>(
@@ -199,6 +469,7 @@ fn process_tile<P: Pixel>(
     slope: f32,
     pool: &ThreadPool,
 ) -> Grid2D<PixelOut> {
+    println!("process_tile");
     pool.install(|| {
         let rad_array = grid
             .data
@@ -224,8 +495,8 @@ fn process_tile<P: Pixel>(
 #[cfg(test)]
 mod tests {
     use crate::engine::{
-        MockExecutionContext, MockQueryContext, QueryProcessor, RasterOperator,
-        RasterQueryProcessor, RasterResultDescriptor, SingleRasterSource,
+        MockExecutionContext, MockQueryContext, MultipleRasterSources, QueryProcessor,
+        RasterOperator, RasterQueryProcessor, RasterResultDescriptor, SingleRasterSource,
     };
     use crate::mock::{MockRasterSource, MockRasterSourceParams};
     use crate::processing::meteosat::xgboost::{XgboostOperator, XgboostParams};
@@ -257,70 +528,74 @@ mod tests {
 
     use std::path::PathBuf;
 
-    fn get_gdal_config_metadata(path: &str) -> GdalMetaDataRegular {
+    fn get_gdal_config_metadata(paths: Vec<&str>) -> Vec<GdalMetaDataRegular> {
         let no_data_value = Some(-1000.0);
 
-        let gdal_config_metadata = GdalMetaDataRegular {
-            result_descriptor: RasterResultDescriptor {
-                data_type: RasterDataType::I16,
-                spatial_reference: SpatialReferenceOption::SpatialReference(SpatialReference::new(
-                    SpatialReferenceAuthority::Epsg,
-                    32632,
-                )),
-                measurement: Measurement::Classification {
-                    measurement: "raw".into(),
-                    classes: hashmap!(0 => "Water Bodies".to_string()),
-                },
-                no_data_value,
-            },
-            params: GdalDatasetParameters {
-                file_path: PathBuf::from(test_data!(path)),
-                rasterband_channel: 1,
-                geo_transform: GdalDatasetGeoTransform {
-                    origin_coordinate: (474112.0, 5646336.0).into(),
-                    x_pixel_size: 10.0,
-                    y_pixel_size: -10.0,
-                },
-                width: 4864,
-                height: 3431,
-                file_not_found_handling: FileNotFoundHandling::NoData,
-                no_data_value,
-                properties_mapping: Some(vec![
-                    GdalMetadataMapping::identity(
-                        new_offset_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                    GdalMetadataMapping::identity(
-                        new_slope_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                    GdalMetadataMapping::identity(
-                        new_channel_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                    GdalMetadataMapping::identity(
-                        new_satellite_key(),
-                        RasterPropertiesEntryType::Number,
-                    ),
-                ]),
-                gdal_open_options: None,
-                gdal_config_options: None,
-            },
-            time_placeholders: hashmap! {
-                "%%%_TIME_FORMATED_%%%".to_string() => GdalSourceTimePlaceholder {
-                    format: "%Y/%m/%d/%Y%m%d_%H%M/H-000-MSG3__-MSG3________-IR_087___-000001___-%Y%m%d%H%M-C_".to_string(),
-                    reference: TimeReference::Start,
+        let mut gmdr = Vec::new();
 
-                }
-            },
-            start: TimeInstance::from_millis(1072917000000).unwrap(),
-            step: TimeStep {
-                granularity: TimeGranularity::Minutes,
-                step: 15,
-            },
-        };
+        for path in paths.iter() {
+            let gdal_config_metadata = GdalMetaDataRegular {
+                result_descriptor: RasterResultDescriptor {
+                    data_type: RasterDataType::I16,
+                    spatial_reference: SpatialReferenceOption::SpatialReference(
+                        SpatialReference::new(SpatialReferenceAuthority::Epsg, 32632),
+                    ),
+                    measurement: Measurement::Classification {
+                        measurement: "raw".into(),
+                        classes: hashmap!(0 => "Water Bodies".to_string()),
+                    },
+                    no_data_value,
+                },
+                params: GdalDatasetParameters {
+                    file_path: PathBuf::from(test_data!(path)),
+                    rasterband_channel: 1,
+                    geo_transform: GdalDatasetGeoTransform {
+                        origin_coordinate: (474112.0, 5646336.0).into(),
+                        x_pixel_size: 10.0,
+                        y_pixel_size: -10.0,
+                    },
+                    width: 4864,
+                    height: 3431,
+                    file_not_found_handling: FileNotFoundHandling::NoData,
+                    no_data_value,
+                    properties_mapping: Some(vec![
+                        GdalMetadataMapping::identity(
+                            new_offset_key(),
+                            RasterPropertiesEntryType::Number,
+                        ),
+                        GdalMetadataMapping::identity(
+                            new_slope_key(),
+                            RasterPropertiesEntryType::Number,
+                        ),
+                        GdalMetadataMapping::identity(
+                            new_channel_key(),
+                            RasterPropertiesEntryType::Number,
+                        ),
+                        GdalMetadataMapping::identity(
+                            new_satellite_key(),
+                            RasterPropertiesEntryType::Number,
+                        ),
+                    ]),
+                    gdal_open_options: None,
+                    gdal_config_options: None,
+                },
+                time_placeholders: hashmap! {
+                    "%%%_TIME_FORMATED_%%%".to_string() => GdalSourceTimePlaceholder {
+                        format: "%Y/%m/%d/%Y%m%d_%H%M/H-000-MSG3__-MSG3________-IR_087___-000001___-%Y%m%d%H%M-C_".to_string(),
+                        reference: TimeReference::Start,
 
-        gdal_config_metadata
+                    }
+                },
+                start: TimeInstance::from_millis(1072917000000).unwrap(),
+                step: TimeStep {
+                    granularity: TimeGranularity::Minutes,
+                    step: 15,
+                },
+            };
+            gmdr.push(gdal_config_metadata);
+        }
+
+        gmdr
     }
 
     async fn initialize_operator(
@@ -388,51 +663,63 @@ mod tests {
 
         let mut tile_buffer: Vec<_> = Vec::new();
 
+        let props = test_util::create_properties(None, None, Some(11.0), Some(2.0));
+
         while let Some(processor) = stream.next().await {
-            tile_buffer.push(processor.unwrap());
+            let mut tile = processor.unwrap();
+            tile.properties = props.clone();
+            tile_buffer.push(tile);
         }
 
         tile_buffer
     }
 
-    async fn get_src(
-        gcm: GdalMetaDataRegular,
-    ) -> crate::engine::SourceOperator<MockRasterSourceParams<i16>> {
-        //let path = "s2_10m_de_marburg/target.tiff";
-        let init_op = initialize_operator(gcm, 512).await;
-        let tile_vec = get_band_data(init_op).await;
+    async fn get_src(gcm_vec: Vec<GdalMetaDataRegular>) -> Vec<Box<dyn RasterOperator>> {
+        let mut src_vec = Vec::new();
 
-        println!("n tiles: {:?}", tile_vec.len());
+        for gcm in gcm_vec.into_iter() {
+            let init_op = initialize_operator(gcm, 512).await;
+            let tile_vec = get_band_data(init_op).await;
 
-        let measurement = Measurement::Classification {
-            measurement: "whyyy".into(),
-            classes: hashmap!(0 => "Water Bodies".to_string()),
-        };
-        let mrs = MockRasterSource {
-            params: MockRasterSourceParams {
-                data: tile_vec,
-                result_descriptor: RasterResultDescriptor {
-                    data_type: RasterDataType::I16,
-                    spatial_reference: SpatialReference::new(
-                        SpatialReferenceAuthority::Epsg,
-                        32632,
-                    )
-                    .into(),
-                    measurement: measurement,
-                    no_data_value: Some(-1000.0).map(AsPrimitive::as_),
+            println!("n tiles: {:?}", tile_vec.len());
+
+            let measurement = Measurement::Classification {
+                measurement: "whyyy".into(),
+                classes: hashmap!(0 => "Water Bodies".to_string()),
+            };
+            let mrs = MockRasterSource {
+                params: MockRasterSourceParams {
+                    data: tile_vec,
+                    result_descriptor: RasterResultDescriptor {
+                        data_type: RasterDataType::I16,
+                        spatial_reference: SpatialReference::new(
+                            SpatialReferenceAuthority::Epsg,
+                            32632,
+                        )
+                        .into(),
+                        measurement: measurement,
+                        no_data_value: Some(-1000.0).map(AsPrimitive::as_),
+                    },
                 },
-            },
-        };
-        mrs
+            };
+            src_vec.push(mrs.boxed());
+        }
+        src_vec
     }
 
     #[tokio::test]
     async fn xg_op_test() {
         // !----------------------------------------------------
-        // TODO: irgendwie die mock raster source implementieren
+        // TODO: xgboost predictions in xgprocessor einflechten
         // !----------------------------------------------------
-        let path = "s2_10m_de_marburg/target.tiff";
-        let gcm = get_gdal_config_metadata(path);
+        // let path = "s2_10m_de_marburg/target.tiff";
+        let paths = vec![
+            "s2_10m_de_marburg/b02.tiff",
+            "s2_10m_de_marburg/b03.tiff",
+            "s2_10m_de_marburg/b04.tiff",
+            "s2_10m_de_marburg/b08.tiff",
+        ];
+        let gcm = get_gdal_config_metadata(paths);
 
         let tiling_specification =
             TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
@@ -442,7 +729,7 @@ mod tests {
         let mut ctx = MockExecutionContext::test_default();
         ctx.tiling_specification = tiling_specification;
 
-        ctx.add_meta_data(id.clone(), Box::new(gcm.clone()));
+        ctx.add_meta_data(id.clone(), Box::new(gcm.first().unwrap().clone()));
 
         let query_bbox = SpatialPartition2D::new(
             (474112.000, 5646336.000).into(),
@@ -457,13 +744,13 @@ mod tests {
             spatial_resolution: query_spatial_resolution,
         };
 
-        let src_operator = get_src(gcm).await;
+        // this operator prepares the input data
+        let srcs = get_src(gcm.clone()).await;
 
+        // xg-operator takes the input data for further processing
         let xg = XgboostOperator {
             params: XgboostParams {},
-            sources: SingleRasterSource {
-                raster: src_operator.boxed(),
-            },
+            sources: MultipleRasterSources { rasters: srcs },
         };
 
         let closure = || RasterOperator::boxed(xg);
@@ -471,6 +758,5 @@ mod tests {
 
         println!("done");
         let r = result.unwrap();
-        println!("{:?}", r);
     }
 }
