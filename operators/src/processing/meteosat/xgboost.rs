@@ -1,34 +1,24 @@
-use std::pin::Pin;
-use std::sync::Arc;
 use std::time::SystemTime;
 use std::{mem, path};
 
-use crate::error;
 use crate::util::stream_zip::StreamVectorZip;
 use async_trait::async_trait;
-use futures::stream::{self, select_all, BoxStream};
-use futures::{future, Stream, StreamExt, TryFutureExt, TryStreamExt};
+use futures::stream::BoxStream;
+use futures::{future, StreamExt};
 use geoengine_datatypes::hashmap;
 use geoengine_datatypes::primitives::{Measurement, RasterQueryRectangle, SpatialPartition2D};
 use geoengine_datatypes::raster::{
-    BaseTile, ConvertDataTypeParallel, EmptyGrid, Grid, Grid2D, GridOrEmpty, GridShape,
-    GridShapeAccess, GridSize, NoDataValue, Pixel, RasterDataType, RasterPropertiesKey,
-    RasterTile2D,
+    BaseTile, Grid2D, GridOrEmpty, GridShape, GridShapeAccess, Pixel, RasterDataType, RasterTile2D,
 };
 use ndarray::Array2;
-use rayon::iter::ParallelIterator;
-use rayon::slice::ParallelSlice;
-use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
 use xgboost_bindings::{Booster, DMatrix};
 
 use crate::engine::{
     ExecutionContext, InitializedRasterOperator, MultipleRasterSources, Operator, QueryContext,
     QueryProcessor, RasterOperator, RasterQueryProcessor, RasterResultDescriptor,
-    SingleRasterSource, TypedRasterQueryProcessor,
+    TypedRasterQueryProcessor,
 };
-use crate::error::Error;
 use crate::util::Result;
 
 use RasterDataType::F32 as RasterOut;
@@ -108,7 +98,9 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
             .collect();
 
         let typed_rqp = match self.sources.first().unwrap().query_processor().unwrap() {
-            QueryProcessorOut(p) => QueryProcessorOut(Box::new(XgboostProcessor::new(vec_of_rqps))),
+            QueryProcessorOut(_p) => {
+                QueryProcessorOut(Box::new(XgboostProcessor::new(vec_of_rqps)))
+            }
             TypedRasterQueryProcessor::U8(_) => todo!(),
             TypedRasterQueryProcessor::U16(_) => todo!(),
             TypedRasterQueryProcessor::U32(_) => todo!(),
@@ -140,145 +132,6 @@ where
     pub fn new(sources: Vec<Q>) -> Self {
         Self { sources }
     }
-
-    async fn process_tile_async2(
-        &self,
-        tiles: Vec<Vec<P>>,
-        pool: Arc<ThreadPool>,
-    ) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
-        let n_cols = tiles.len();
-        let n_rows = tiles.first().unwrap().len();
-
-        let mut data: Vec<f64> = Vec::new();
-        for i in 0..n_rows {
-            let mut row = Vec::new();
-            for c in 0..n_cols {
-                let val = tiles.get(c).unwrap().get(i).unwrap();
-                let v = (val).as_();
-                row.push(v);
-            }
-
-            data.extend_from_slice(&row);
-        }
-
-        let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), data).unwrap();
-
-        // define information needed for xgboost
-        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
-
-        // get xgboost style matrices
-        let xg_matrix = DMatrix::from_col_major_f64(
-            data_arr_2d.as_slice_memory_order().unwrap(),
-            byte_size_ax_0,
-            byte_size_ax_1,
-            n_rows,
-            n_cols,
-        )
-        .unwrap();
-
-        let booster_model = Booster::load(path::Path::new("model.json")).unwrap();
-        let start = SystemTime::now();
-
-        let mut out_dim: u64 = 0;
-        let shp = &[n_rows as u64, n_cols as u64];
-        let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
-        let end = SystemTime::now();
-        let duration = end.duration_since(start).unwrap();
-        println!("it took {} ms", duration.as_millis());
-
-        result
-    }
-
-    // apply xgboost model prediction here
-    async fn process_tile_async(
-        &self,
-        tile: RasterTile2D<P>,
-        pool: Arc<ThreadPool>,
-    ) -> Result<RasterTile2D<PixelOut>> {
-        if tile.is_empty() {
-            return Ok(RasterTile2D::new_with_properties(
-                tile.time,
-                tile.tile_position,
-                tile.global_geo_transform,
-                EmptyGrid::new(tile.grid_array.grid_shape(), OUT_NO_DATA_VALUE).into(),
-                tile.properties,
-            ));
-        }
-        let grid_shape = tile.grid_shape();
-
-        let mat_tile = tile.into_materialized_tile(); // NOTE: the tile is already materialized.
-
-        let data_of_tile = mat_tile.grid_array.data;
-        let predicted_tile_data = self.predict(data_of_tile).unwrap();
-        let no_data = -1000.0;
-        let predicted_grid = Grid2D::new(grid_shape, predicted_tile_data, Some(no_data))
-            .expect("raster creation must succeed");
-
-        Ok(RasterTile2D::new_with_properties(
-            mat_tile.time,
-            mat_tile.tile_position,
-            mat_tile.global_geo_transform,
-            predicted_grid.into(),
-            mat_tile.properties,
-        ))
-    }
-
-    fn predict(&self, tile: Vec<P>) -> Result<Vec<f32>, xgboost_bindings::XGBError> {
-        // make xg compatible, trainable datastructure
-        let xg_matrix = self.make_xg_data_no_labels(tile);
-
-        let booster_model = Booster::load(path::Path::new("model.json"))?;
-        let start = SystemTime::now();
-
-        let mut out_dim: u64 = 0;
-        let shp = &[(512 as u64 * 512 as u64), 1];
-        let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
-        let end = SystemTime::now();
-        let duration = end.duration_since(start).unwrap();
-        println!("it took {} ms", duration.as_millis());
-        result
-    }
-
-    fn make_xg_data_no_labels(&self, tile: Vec<P>) -> DMatrix {
-        let mut tabular_like_data_vec = Vec::new();
-
-        for i in 0..tile.len() {
-            let e1 = tile.get(i).unwrap();
-
-            let row = vec![e1.to_owned().as_()];
-            tabular_like_data_vec.extend_from_slice(&row);
-        }
-
-        let n_cols = 1;
-        let n_rows = tabular_like_data_vec.len() / n_cols;
-
-        let data_arr_2d =
-            Array2::from_shape_vec((n_rows as usize, n_cols), tabular_like_data_vec).unwrap();
-
-        // define information needed for xgboost
-        let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-        let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-        let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-        let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
-
-        // get xgboost style matrices
-        let xg_matrix = DMatrix::from_col_major_f64(
-            data_arr_2d.as_slice_memory_order().unwrap(),
-            byte_size_ax_0,
-            byte_size_ax_1,
-            tile.len(),
-            n_cols as usize,
-        )
-        .unwrap();
-
-        // set labels
-        // TODO: make more generic
-
-        xg_matrix
-    }
 }
 
 #[async_trait]
@@ -299,8 +152,7 @@ where
         let mut buffer = Vec::new();
 
         for band in self.sources.iter() {
-            let mut stream = band.query(query, ctx).await?;
-
+            let stream = band.query(query, ctx).await?;
             buffer.push(stream);
         }
 
@@ -325,10 +177,6 @@ where
         let x = self.sources.first().unwrap();
         let mut xx = x.query(query, ctx).await.unwrap();
         let tile_ref = xx.next().await.unwrap().unwrap();
-
-        // let mut tiled_bands: Vec<_> = s.collect().await;
-        // let tile_vec = tiled_bands.first().unwrap();
-        // let tile_ref = tile_vec.first().unwrap().as_ref().unwrap();
 
         let grid_shp = tile_ref.grid_shape();
         let time = query.time_interval;
@@ -363,12 +211,6 @@ where
         let whats_in_the_box = Box::pin(futures::stream::iter(predicted_tiles));
         let aaa = whats_in_the_box.boxed();
 
-        let src1 = self.sources.get(0).unwrap().query(query, ctx).await?;
-        let src2 = self.sources.get(1).unwrap().query(query, ctx).await?;
-
-        // let src = self.sources.query(query, ctx).await?;
-        let rs =
-            src1.and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
         Ok(aaa)
     }
 }
@@ -433,40 +275,11 @@ async fn predict_tile_data<P: Pixel>(stream: Vec<Vec<Vec<P>>>) -> Vec<Vec<f32>> 
     x
 }
 
-fn process_tile<P: Pixel>(
-    grid: &Grid2D<P>,
-    offset: f32,
-    slope: f32,
-    pool: &ThreadPool,
-) -> Grid2D<PixelOut> {
-    println!("process_tile");
-    pool.install(|| {
-        let rad_array = grid
-            .data
-            .par_chunks(grid.axis_size_x())
-            .map(|row| {
-                row.iter().map(|p| {
-                    if grid.is_no_data(*p) {
-                        OUT_NO_DATA_VALUE
-                    } else {
-                        let val: PixelOut = (p).as_();
-                        offset + val * slope
-                    }
-                })
-            })
-            .flatten_iter()
-            .collect::<Vec<PixelOut>>();
-
-        Grid2D::new(grid.grid_shape(), rad_array, Some(OUT_NO_DATA_VALUE))
-            .expect("raster creation must succeed")
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use crate::engine::{
-        MockExecutionContext, MockQueryContext, MultipleRasterSources, QueryProcessor,
-        RasterOperator, RasterQueryProcessor, RasterResultDescriptor, SingleRasterSource,
+        MockExecutionContext, MockQueryContext, MultipleRasterSources, RasterOperator,
+        RasterQueryProcessor, RasterResultDescriptor,
     };
     use crate::mock::{MockRasterSource, MockRasterSourceParams};
     use crate::processing::meteosat::xgboost::{XgboostOperator, XgboostParams};
@@ -478,7 +291,6 @@ mod tests {
         GdalMetadataMapping, GdalSource, GdalSourceParameters, GdalSourceTimePlaceholder,
         TimeReference,
     };
-    use crate::util::Result;
     use futures::StreamExt;
     use geoengine_datatypes::dataset::{DatasetId, InternalDatasetId};
     use geoengine_datatypes::primitives::{
@@ -486,7 +298,7 @@ mod tests {
         SpatialResolution, TimeGranularity, TimeInstance, TimeInterval, TimeStep,
     };
     use geoengine_datatypes::raster::{
-        Grid2D, GridOrEmpty, RasterDataType, RasterPropertiesEntryType, TilingSpecification,
+        GridOrEmpty, RasterDataType, RasterPropertiesEntryType, TilingSpecification,
     };
     use geoengine_datatypes::spatial_reference::{
         SpatialReference, SpatialReferenceAuthority, SpatialReferenceOption,
@@ -644,7 +456,6 @@ mod tests {
         tile_buffer
     }
 
-
     /// Build a MockRasterSource to use with the operator
     async fn get_src(gcm_vec: Vec<GdalMetaDataRegular>) -> Vec<Box<dyn RasterOperator>> {
         let mut src_vec = Vec::new();
@@ -681,7 +492,6 @@ mod tests {
 
     #[tokio::test]
     async fn xg_op_test() {
-       
         // setup data to predict
         let paths = vec![
             "s2_10m_de_marburg/b02.tiff",
@@ -715,7 +525,6 @@ mod tests {
             time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
             spatial_resolution: query_spatial_resolution,
         };
-
 
         // this operator prepares the input data
         let srcs = get_src(gcm.clone()).await;
