@@ -87,7 +87,7 @@ mod test_util {
         let ctx = MockQueryContext::test_default();
         let result_stream = processor.query(query, &ctx).await.unwrap();
         let mut result: Vec<Result<RasterTile2D<f32>>> = result_stream.collect().await;
-        assert_eq!(1, result.len());
+        assert_eq!(77, result.len());
         result.pop().unwrap()
     }
 

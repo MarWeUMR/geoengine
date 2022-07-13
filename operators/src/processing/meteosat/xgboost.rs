@@ -505,10 +505,13 @@ mod tests {
 
         let tiling_specification =
             TilingSpecification::new(Coordinate2D::default(), [512, 512].into());
+
         let id = DatasetId::Internal {
             dataset_id: InternalDatasetId::new(),
         };
+
         let mut ctx = MockExecutionContext::test_default();
+
         ctx.tiling_specification = tiling_specification;
 
         ctx.add_meta_data(id.clone(), Box::new(gcm.first().unwrap().clone()));
@@ -518,6 +521,7 @@ mod tests {
             (522752.000, 5612026.000).into(),
         )
         .unwrap();
+
         let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
 
         let qry_rectangle = RasterQueryRectangle {
