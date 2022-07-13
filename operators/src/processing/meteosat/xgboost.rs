@@ -56,6 +56,7 @@ impl RasterOperator for XgboostOperator {
         self: Box<Self>,
         context: &dyn ExecutionContext,
     ) -> Result<Box<dyn InitializedRasterOperator>> {
+        println!("initializing raster sources");
         let self_source = self.sources.clone();
         let rasters = self_source.rasters;
 
@@ -95,6 +96,7 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
     }
 
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
+        println!("typing rasters");
         let vec_of_rqps = self
             .sources
             .iter()
@@ -293,6 +295,7 @@ where
         query: RasterQueryRectangle,
         ctx: &'a dyn QueryContext,
     ) -> Result<BoxStream<'a, Result<Self::Output>>> {
+        println!("querying");
         let mut buffer = Vec::new();
 
         for band in self.sources.iter() {
@@ -304,13 +307,13 @@ where
         let s = StreamVectorZip::new(buffer);
 
         let stream_of_tiled_bands = s
-            .then(|x| async move {
-                let extracted_data_from_bands_in_tile: Vec<Vec<P>> = x
+            .then(|elem| async move {
+                let extracted_data_from_bands_in_tile: Vec<Vec<P>> = elem
                     .into_iter()
                     .map(|t| {
                         let tile = t.unwrap();
-                        let tt = tile.into_materialized_tile();
-                        let data = tt.grid_array.data;
+                        let mat_tile = tile.into_materialized_tile();
+                        let data = mat_tile.grid_array.data;
 
                         data
                     })
@@ -319,9 +322,13 @@ where
             })
             .boxed();
 
-        let mut tiled_bands: Vec<_> = s.collect().await;
-        let tile_vec = tiled_bands.first().unwrap();
-        let tile_ref = tile_vec.first().unwrap().as_ref().unwrap();
+        let x = self.sources.first().unwrap();
+        let mut xx = x.query(query, ctx).await.unwrap();
+        let tile_ref = xx.next().await.unwrap().unwrap();
+
+        // let mut tiled_bands: Vec<_> = s.collect().await;
+        // let tile_vec = tiled_bands.first().unwrap();
+        // let tile_ref = tile_vec.first().unwrap().as_ref().unwrap();
 
         let grid_shp = tile_ref.grid_shape();
         let time = query.time_interval;
@@ -329,9 +336,11 @@ where
         let global_geo_transform = tile_ref.global_geo_transform;
         let properties = tile_ref.properties.clone();
 
-        let xxx = predict_tile_data(stream_of_tiled_bands).await;
+        let y: Vec<_> = stream_of_tiled_bands.collect().await;
+        let predicted_data = predict_tile_data(y).await;
 
-        let abc: Vec<_> = xxx
+        println!("generating new tiles");
+        let predicted_tiles: Vec<_> = predicted_data
             .into_iter()
             .map(|tile| {
                 let no_data = -1000.0;
@@ -351,53 +360,8 @@ where
             })
             .collect::<Vec<Result<_>>>();
 
-        // let kp: Vec<_> = tiled_bands
-        //     .into_iter()
-        //     .map(|tile_vec_result| {
-        //         let extracted_data_from_bands_in_tile: Vec<Vec<P>> = tile_vec_result
-        //             .into_iter()
-        //             .map(|t| {
-        //                 let tile = t.unwrap();
-        //                 let tt = tile.into_materialized_tile();
-        //                 let data = tt.grid_array.data;
-
-        //                 data
-        //             })
-        //             .collect();
-
-        //         futures::stream::iter(extracted_data_from_bands_in_tile)
-        //     })
-        //     .collect();
-
-        // let bands_of_first_tile = tiled_bands.pop().unwrap();
-
-        // let extracted_data_from_bands_in_tile: Vec<Vec<P>> = bands_of_first_tile
-        //     .into_iter()
-        //     .map(|t| {
-        //         let tile = t.unwrap();
-        //         let tt = tile.into_materialized_tile();
-        //         let data = tt.grid_array.data;
-
-        //         data
-        //     })
-        //     .collect();
-
-        // let predicted_tile_data = self
-        //     .process_tile_async2(extracted_data_from_bands_in_tile, ctx.thread_pool().clone())
-        //     .await
-        //     .unwrap();
-
-        // let no_data = -1000.0;
-        // let predicted_grid = Grid2D::new(grid_shp, predicted_tile_data, Some(no_data))
-        //     .expect("raster creation must succeed");
-
-        // let rt = RasterTile2D::new_with_properties(
-        //     time,
-        //     tile_position,
-        //     global_geo_transform,
-        //     predicted_grid.into(),
-        //     properties,
-        // );
+        let whats_in_the_box = Box::pin(futures::stream::iter(predicted_tiles));
+        let aaa = whats_in_the_box.boxed();
 
         let src1 = self.sources.get(0).unwrap().query(query, ctx).await?;
         let src2 = self.sources.get(1).unwrap().query(query, ctx).await?;
@@ -405,18 +369,18 @@ where
         // let src = self.sources.query(query, ctx).await?;
         let rs =
             src1.and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
-        Ok(rs.boxed())
+        Ok(aaa)
     }
 }
 
-async fn predict_tile_data<P: Pixel>(
-    stream_of_tiled_bands: Pin<Box<dyn Stream<Item = Vec<Vec<P>>> + Send>>,
-) -> Vec<Vec<f32>> {
-    let stream: Vec<_> = stream_of_tiled_bands.collect().await;
+async fn predict_tile_data<P: Pixel>(stream: Vec<Vec<Vec<P>>>) -> Vec<Vec<f32>> {
+    // let stream: Vec<_> = stream_of_tiled_bands.collect().await;
 
     let x: Vec<_> = stream
         .iter()
-        .map(|elem| {
+        .enumerate()
+        .map(|(i, elem)| {
+            println!("predicting tile: {:?} now", i);
             let n_cols = elem.len();
             let n_rows = elem.first().unwrap().len();
 
@@ -450,12 +414,18 @@ async fn predict_tile_data<P: Pixel>(
             )
             .unwrap();
 
-            let booster_model = Booster::load(path::Path::new("model.json")).unwrap();
+            let booster_model =
+                Booster::load(path::Path::new("/workspace/geoengine/operators/model.json"))
+                    .unwrap();
             let start = SystemTime::now();
 
             let mut out_dim: u64 = 0;
             let shp = &[n_rows as u64, n_cols as u64];
             let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+            let end = SystemTime::now();
+            let duration = end.duration_since(start).unwrap();
+            println!("prediction from xg took {} ms", duration.as_millis());
+
             result.unwrap()
         })
         .collect();
@@ -758,5 +728,6 @@ mod tests {
 
         println!("done");
         let r = result.unwrap();
+        println!("{:?}", r);
     }
 }
