@@ -644,6 +644,8 @@ mod tests {
         tile_buffer
     }
 
+
+    /// Build a MockRasterSource to use with the operator
     async fn get_src(gcm_vec: Vec<GdalMetaDataRegular>) -> Vec<Box<dyn RasterOperator>> {
         let mut src_vec = Vec::new();
 
@@ -654,7 +656,7 @@ mod tests {
             println!("n tiles: {:?}", tile_vec.len());
 
             let measurement = Measurement::Classification {
-                measurement: "whyyy".into(),
+                measurement: "water".into(),
                 classes: hashmap!(0 => "Water Bodies".to_string()),
             };
             let mrs = MockRasterSource {
@@ -667,7 +669,7 @@ mod tests {
                             32632,
                         )
                         .into(),
-                        measurement: measurement,
+                        measurement,
                         no_data_value: Some(-1000.0).map(AsPrimitive::as_),
                     },
                 },
@@ -679,16 +681,16 @@ mod tests {
 
     #[tokio::test]
     async fn xg_op_test() {
-        // !----------------------------------------------------
-        // TODO: xgboost predictions in xgprocessor einflechten
-        // !----------------------------------------------------
-        // let path = "s2_10m_de_marburg/target.tiff";
+       
+        // setup data to predict
         let paths = vec![
             "s2_10m_de_marburg/b02.tiff",
             "s2_10m_de_marburg/b03.tiff",
             "s2_10m_de_marburg/b04.tiff",
             "s2_10m_de_marburg/b08.tiff",
         ];
+
+        // setup context and meta data
         let gcm = get_gdal_config_metadata(paths);
 
         let tiling_specification =
@@ -713,6 +715,7 @@ mod tests {
             time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
             spatial_resolution: query_spatial_resolution,
         };
+
 
         // this operator prepares the input data
         let srcs = get_src(gcm.clone()).await;
