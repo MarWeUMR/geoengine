@@ -98,16 +98,20 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
             .collect();
 
         let typed_rqp = match self.sources.first().unwrap().query_processor().unwrap() {
-            QueryProcessorOut(_p) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(vec_of_rqps)))
-            }
+            QueryProcessorOut(_p) => QueryProcessorOut(Box::new(XgboostProcessor::new(
+                vec_of_rqps,
+                "/workspace/geoengine/operators/model.json".into(),
+            ))),
             TypedRasterQueryProcessor::U8(_) => todo!(),
             TypedRasterQueryProcessor::U16(_) => todo!(),
             TypedRasterQueryProcessor::U32(_) => todo!(),
             TypedRasterQueryProcessor::U64(_) => todo!(),
             TypedRasterQueryProcessor::I8(_) => todo!(),
             TypedRasterQueryProcessor::I16(_) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(vec_of_rqps)))
+                QueryProcessorOut(Box::new(XgboostProcessor::new(
+                    vec_of_rqps,
+                    "/workspace/geoengine/operators/model.json".into(),
+                )))
             }
             TypedRasterQueryProcessor::I32(_) => todo!(),
             TypedRasterQueryProcessor::I64(_) => todo!(),
@@ -122,6 +126,8 @@ where
     Q: RasterQueryProcessor<RasterType = P>,
 {
     sources: Vec<Q>,
+    model_file: String,
+    bst: Booster,
 }
 
 impl<Q, P> XgboostProcessor<Q, P>
@@ -129,8 +135,12 @@ where
     Q: RasterQueryProcessor<RasterType = P>,
     P: Pixel,
 {
-    pub fn new(sources: Vec<Q>) -> Self {
-        Self { sources }
+    pub fn new(sources: Vec<Q>, model_file_path: String) -> Self {
+        Self {
+            sources,
+            model_file: model_file_path.clone(),
+            bst: Booster::load(model_file_path.clone()).unwrap(),
+        }
     }
 }
 
@@ -185,7 +195,8 @@ where
         let properties = tile_ref.properties.clone();
 
         let y: Vec<_> = stream_of_tiled_bands.collect().await;
-        let predicted_data = predict_tile_data(y).await;
+        let bst = &self.bst;
+        let predicted_data = predict_tile_data(y, bst).await;
 
         println!("generating new tiles");
         let predicted_tiles: Vec<_> = predicted_data
@@ -215,9 +226,7 @@ where
     }
 }
 
-async fn predict_tile_data<P: Pixel>(stream: Vec<Vec<Vec<P>>>) -> Vec<Vec<f32>> {
-    // let stream: Vec<_> = stream_of_tiled_bands.collect().await;
-
+async fn predict_tile_data<P: Pixel>(stream: Vec<Vec<Vec<P>>>, bst: &Booster) -> Vec<Vec<f32>> {
     let x: Vec<_> = stream
         .iter()
         .enumerate()
@@ -256,14 +265,11 @@ async fn predict_tile_data<P: Pixel>(stream: Vec<Vec<Vec<P>>>) -> Vec<Vec<f32>> 
             )
             .unwrap();
 
-            let booster_model =
-                Booster::load(path::Path::new("/workspace/geoengine/operators/model.json"))
-                    .unwrap();
             let start = SystemTime::now();
 
             let mut out_dim: u64 = 0;
             let shp = &[n_rows as u64, n_cols as u64];
-            let result = booster_model.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+            let result = bst.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
             let end = SystemTime::now();
             let duration = end.duration_since(start).unwrap();
             println!("prediction from xg took {} ms", duration.as_millis());
@@ -492,6 +498,8 @@ mod tests {
 
     #[tokio::test]
     async fn xg_op_test() {
+        // TODO: investigate performance
+        // TODO: try to parallelize stuff
         // setup data to predict
         let paths = vec![
             "s2_10m_de_marburg/b02.tiff",
