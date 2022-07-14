@@ -15,4 +15,4 @@ vscode:
     - asvetliakov.vscode-neovim
     - tamasfe.even-better-toml
     - aaron-bond.better-comments
-    #- rust-lang.rust-analyzer
+    - https://github.com/rust-lang/rust-analyzer/releases/download/2022-07-11/rust-analyzer-linux-x64.vsix
