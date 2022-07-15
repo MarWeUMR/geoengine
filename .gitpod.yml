@@ -1,5 +1,5 @@
 tasks:
-  - init: cargo test --package geoengine-operators --lib -- processing::meteosat::xgboost::tests::test_xg_ok --exact --nocapture
+  - init: cargo test --package geoengine-operators --lib -- processing::meteosat::xgboost::tests::test_xg_ok --exact --nocapture --no-run
 
 image:
   file: .gitpod.Dockerfile
