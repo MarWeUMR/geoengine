@@ -9,9 +9,6 @@ vscode:
     - serayuzgur.crates
     - usernamehw.errorlens
     - vadimcn.vscode-lldb
-    - hbenl.vscode-test-explorer
-    - Swellaby.vscode-rust-test-adapter
-    - hbenl.test-adapter-converter
     - asvetliakov.vscode-neovim
     - tamasfe.even-better-toml
     - aaron-bond.better-comments
