@@ -1,19 +1,34 @@
+use itertools::izip;
+use rayon::collections::vec_deque::IterMut;
+use rayon::prelude::*;
+use rayon::vec::IntoIter;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::time::Instant;
 
+use crate::error::Error;
 use crate::util::stream_zip::StreamVectorZip;
 use async_trait::async_trait;
 use futures::stream;
 use futures::stream::BoxStream;
+use futures::stream::FuturesOrdered;
 use futures::{future, StreamExt};
+
+use futures::TryStreamExt;
 use geoengine_datatypes::hashmap;
 use geoengine_datatypes::primitives::{Measurement, RasterQueryRectangle, SpatialPartition2D};
+use geoengine_datatypes::raster::EmptyGrid;
 use geoengine_datatypes::raster::{
     BaseTile, Grid2D, GridOrEmpty, GridShape, GridShapeAccess, Pixel, RasterDataType, RasterTile2D,
 };
 use ndarray::Array2;
 
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
+use rayon::iter::Zip;
+use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
 use xgboost_bindings::{Booster, DMatrix};
 
@@ -28,6 +43,7 @@ use RasterDataType::F32 as RasterOut;
 
 use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 
+// TODO: what to do with this?
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct XgboostParams {}
@@ -143,6 +159,140 @@ where
             model_file: std::fs::read_to_string(model_file_path).unwrap(),
         }
     }
+
+    async fn async_func(
+        &self,
+        bands_of_tile: Vec<
+            Result<BaseTile<GridOrEmpty<GridShape<[usize; 2]>, P>>, crate::error::Error>,
+        >,
+        pool: Arc<ThreadPool>,
+    ) -> Result<RasterTile2D<PixelOut>> {
+        println!("async_func");
+        let t = bands_of_tile.first().unwrap();
+        let tile = t.as_ref().unwrap().clone();
+        let n_rows = tile.grid_shape_array()[0];
+        let n_cols = tile.grid_shape_array()[1];
+        let n_bands = bands_of_tile.len() as i32;
+        let grid_shape = tile.grid_shape();
+        let props = tile.properties;
+        // let result = Ok(RasterTile2D::new_with_properties(
+        //     tile.time,
+        //     tile.tile_position,
+        //     tile.global_geo_transform,
+        //     EmptyGrid::new(tile.grid_array.grid_shape(), OUT_NO_DATA_VALUE).into(),
+        //     tile.properties.clone(),
+        // ));
+
+        let mut rasters: Vec<_> = bands_of_tile
+            .into_iter()
+            .map(|band| {
+                let band_ok = band.unwrap();
+                let mat_tile = band_ok.into_materialized_tile();
+                let pixel_data = mat_tile
+                    .grid_array
+                    .data
+                    .into_iter()
+                    .map(|x| x.as_())
+                    .collect::<Vec<f64>>();
+                pixel_data
+            })
+            .collect();
+
+        let mut pixels: Vec<_> = Vec::new();
+
+        for row in 0..(n_rows * n_cols) {
+            let mut row_data: Vec<_> = Vec::new();
+            for col in 0..n_bands {
+                let pxl = rasters
+                    .get(col as usize)
+                    .unwrap()
+                    .get(row)
+                    .unwrap()
+                    .to_owned();
+                row_data.push(pxl);
+            }
+            pixels.extend_from_slice(&row_data);
+        }
+
+        let x = self.model_file.clone();
+        let predicted_grid = crate::util::spawn_blocking(move || {
+            process_tile(
+                pixels,
+                &pool,
+                x.as_bytes(),
+                grid_shape.clone(),
+                n_bands as usize,
+            )
+        })
+        .await
+        .unwrap();
+
+        let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
+            RasterTile2D::new_with_properties(
+                tile.time,
+                tile.tile_position,
+                tile.global_geo_transform,
+                predicted_grid.into(),
+                props.clone(),
+            );
+
+        Ok(rt)
+    }
+}
+
+fn process_tile(
+    bands_of_tile: Vec<f64>,
+    pool: &ThreadPool,
+    model_file: &[u8],
+    grid_shape: GridShape<[usize; 2]>,
+    n_bands: usize,
+) -> geoengine_datatypes::raster::Grid<GridShape<[usize; 2]>, f32> {
+    let p = pool.install(|| {
+        println!(
+            "processing tile with thread {:?}",
+            pool.current_thread_index()
+        );
+        let n_rows = grid_shape.shape_array[0];
+        let n_cols = grid_shape.shape_array[1];
+        let chunk_size = 64 * 64;
+        let res: Vec<_> = bands_of_tile
+            .par_chunks(n_bands * chunk_size)
+            .map(|elem| {
+                let v = Vec::from(elem);
+                let true_chunk_size = v.len() / n_bands;
+                println!("chunk size: {:?}", v.len());
+                let data_arr_2d = Array2::from_shape_vec((true_chunk_size, n_bands), v).unwrap();
+                let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+                let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+                let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+                let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+
+                // get xgboost style matrices
+                let xg_matrix = DMatrix::from_col_major_f64(
+                    data_arr_2d.as_slice_memory_order().unwrap(),
+                    byte_size_ax_0,
+                    byte_size_ax_1,
+                    true_chunk_size,
+                    n_bands,
+                )
+                .unwrap();
+
+                let mut out_dim: u64 = 0;
+                let shp = &[true_chunk_size as u64, n_bands as u64];
+                let bst = Booster::load_buffer(model_file).unwrap();
+                // measure time for prediction
+                let start = Instant::now();
+                let result = bst.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+                let end = start.elapsed();
+                println!("prediction time: {:?}", end);
+                result.unwrap()
+            })
+            .flatten_iter()
+            .collect();
+
+        Grid2D::new(grid_shape, res, Some(OUT_NO_DATA_VALUE)).expect("raster creation must succeed")
+    });
+    p
 }
 
 #[async_trait]
@@ -176,93 +326,108 @@ where
         let mut band_buffer = Vec::new();
 
         for band in self.sources.iter() {
-            let stream = band.query(query, ctx).await?;
+            let stream = band.query(query, ctx).await.unwrap();
             band_buffer.push(stream);
         }
 
         let zipped_stream_tiled_bands = StreamVectorZip::new(band_buffer);
-        let bbb: Vec<_> = zipped_stream_tiled_bands.collect().await;
 
-        let xg_mat_vec = Arc::new(Mutex::new(Vec::new()));
+        // ! --------------------------
+        let s: Vec<_> = zipped_stream_tiled_bands.collect().await;
+        let strm = stream::iter(s)
+            .map(|tile| {
+                let r = Ok(tile);
+                r
+            })
+            .boxed();
+        let rs = strm.and_then(move |tile| self.async_func(tile, ctx.thread_pool().clone()));
 
-        let pool = ctx.thread_pool().clone();
-        pool.install(|| {
-            bbb.into_iter().for_each(|tile| {
-                println!("spawning");
-                let shp = grid_shp.shape_array.clone();
-                let n_rows = shp[0] * shp[1];
-                let n_cols = tile.len();
+        Ok(rs.boxed())
+        // ! --------------------------
+        // let zipped_bands: Vec<_> = zipped_stream_tiled_bands.collect().await;
 
-                let rasters: Vec<_> = tile
-                    .into_iter()
-                    .map(|band| {
-                        let b = band.unwrap();
-                        let mat = b.into_materialized_tile();
-                        mat.grid_array.data
-                    })
-                    .collect();
+        // let xg_mat_vec = Arc::new(Mutex::new(Vec::new()));
 
-                let mut data: Vec<f64> = Vec::new();
-                for i in 0..n_rows {
-                    let mut row = Vec::new();
-                    for col in 0..n_cols {
-                        let pixel_value: f64 = rasters.get(col).unwrap().get(i).unwrap().as_();
-                        row.push(pixel_value);
-                    }
+        // let pool = ctx.thread_pool().clone();
+        // zipped_bands.into_iter().for_each(|tile| {
+        //     pool.install(|| {
+        //         println!("spawning");
+        //         let shp = grid_shp.shape_array.clone();
+        //         let n_rows = shp[0] * shp[1];
+        //         let n_cols = tile.len();
 
-                    data.extend_from_slice(&row);
-                }
+        //         // for every tile there are n bands, of which we need to get the underlying data
+        //         let rasters: Vec<_> = tile
+        //             .into_iter()
+        //             .map(|band| {
+        //                 let band_ok = band.unwrap();
+        //                 let mat_tile = band_ok.into_materialized_tile();
+        //                 let pixel_data = mat_tile.grid_array.data;
+        //                 pixel_data
+        //             })
+        //             .collect();
 
-                let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), data).unwrap();
+        //         let mut data: Vec<f64> = Vec::new();
+        //         for row in 0..n_rows {
+        //             let mut row_data = Vec::new();
+        //             for col in 0..n_cols {
+        //                 let pixel_value: f64 = rasters.get(col).unwrap().get(row).unwrap().as_();
+        //                 row_data.push(pixel_value);
+        //             }
 
-                // define information needed for xgboost
-                let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-                let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-                let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-                let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+        //             data.extend_from_slice(&row_data);
+        //         }
 
-                // get xgboost style matrices
-                let xg_matrix = DMatrix::from_col_major_f64(
-                    data_arr_2d.as_slice_memory_order().unwrap(),
-                    byte_size_ax_0,
-                    byte_size_ax_1,
-                    n_rows,
-                    n_cols,
-                )
-                .unwrap();
+        //         let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), data).unwrap();
 
-                let mut out_dim: u64 = 0;
-                let shp = &[n_rows as u64, n_cols as u64];
-                let bst = Booster::load_buffer(self.model_file.as_bytes()).unwrap();
-                let result = bst.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
+        //         // define information needed for xgboost
+        //         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        //         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        //         let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        //         let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
 
-                let no_data = Some(-1000.0);
-                let predicted_grid = Grid2D::new(grid_shp, result.unwrap(), no_data)
-                    .expect("raster creation must succeed");
+        //         // get xgboost style matrices
+        //         let xg_matrix = DMatrix::from_col_major_f64(
+        //             data_arr_2d.as_slice_memory_order().unwrap(),
+        //             byte_size_ax_0,
+        //             byte_size_ax_1,
+        //             n_rows,
+        //             n_cols,
+        //         )
+        //         .unwrap();
 
-                let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
-                    RasterTile2D::new_with_properties(
-                        time,
-                        tile_position,
-                        global_geo_transform,
-                        predicted_grid.into(),
-                        properties.clone(),
-                    );
+        //         let mut out_dim: u64 = 0;
+        //         let shp = &[n_rows as u64, n_cols as u64];
+        //         let bst = Booster::load_buffer(self.model_file.as_bytes()).unwrap();
+        //         let result = bst.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
 
-                xg_mat_vec.lock().unwrap().push(rt);
-            });
-        });
+        //         let no_data = Some(-1000.0);
+        //         let predicted_grid = Grid2D::new(grid_shp, result.unwrap(), no_data)
+        //             .expect("raster creation must succeed");
 
-        let mutex = Arc::try_unwrap(xg_mat_vec).unwrap();
-        let inn = mutex.into_inner().unwrap();
-        let s = stream::once(future::ready(Ok(inn)));
-        let y = s.flat_map(|x: Result<Vec<_>, _>| match x {
-            Ok(x) => stream::iter(x).map(|x| Ok(x)).boxed(),
-            Err(x) => stream::once(future::ready(Err(x))).boxed(),
-        });
+        //         let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
+        //             RasterTile2D::new_with_properties(
+        //                 time,
+        //                 tile_position,
+        //                 global_geo_transform,
+        //                 predicted_grid.into(),
+        //                 properties.clone(),
+        //             );
 
-        let yy = y.boxed();
-        Ok(yy)
+        //         xg_mat_vec.lock().unwrap().push(rt);
+        //     });
+        // });
+
+        // let mutex = Arc::try_unwrap(xg_mat_vec).unwrap();
+        // let inn = mutex.into_inner().unwrap();
+        // let s = stream::once(future::ready(Ok(inn)));
+        // let y = s.flat_map(|x: Result<Vec<_>, _>| match x {
+        //     Ok(x) => stream::iter(x).map(|x| Ok(x)).boxed(),
+        //     Err(x) => stream::once(future::ready(Err(x))).boxed(),
+        // });
+
+        // let yy = y.boxed();
+        // Ok(yy)
     }
 }
 
