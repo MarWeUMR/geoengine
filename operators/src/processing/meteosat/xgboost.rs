@@ -44,15 +44,18 @@ use RasterDataType::F32 as RasterOut;
 use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 
 // TODO: what to do with this?
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct XgboostParams {}
+pub struct XgboostParams {
+    model_file_path: String,
+}
 
 pub type XgboostOperator = Operator<XgboostParams, MultipleRasterSources>;
 
 pub struct InitializedXgboostOperator {
     result_descriptor: RasterResultDescriptor,
     sources: Vec<Box<dyn InitializedRasterOperator>>,
+    model_file_path: String,
 }
 
 type PixelOut = f32;
@@ -89,10 +92,10 @@ impl RasterOperator for XgboostOperator {
             },
             no_data_value: Some(f64::from(OUT_NO_DATA_VALUE)),
         };
-
         let initialized_operator = InitializedXgboostOperator {
             result_descriptor: out_desc,
             sources: init_rasters,
+            model_file_path: self.params.model_file_path,
         };
 
         Ok(initialized_operator.boxed())
@@ -106,6 +109,7 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
 
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
         println!("typing rasters");
+
         let vec_of_rqps = self
             .sources
             .iter()
@@ -119,19 +123,16 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
         let typed_rqp = match self.sources.first().unwrap().query_processor().unwrap() {
             QueryProcessorOut(_p) => QueryProcessorOut(Box::new(XgboostProcessor::new(
                 vec_of_rqps,
-                "/workspace/geoengine/operators/model.json".into(),
+                self.model_file_path.clone(),
             ))),
             TypedRasterQueryProcessor::U8(_) => todo!(),
             TypedRasterQueryProcessor::U16(_) => todo!(),
             TypedRasterQueryProcessor::U32(_) => todo!(),
             TypedRasterQueryProcessor::U64(_) => todo!(),
             TypedRasterQueryProcessor::I8(_) => todo!(),
-            TypedRasterQueryProcessor::I16(_) => {
-                QueryProcessorOut(Box::new(XgboostProcessor::new(
-                    vec_of_rqps,
-                    "/workspace/geoengine/operators/model.json".into(),
-                )))
-            }
+            TypedRasterQueryProcessor::I16(_) => QueryProcessorOut(Box::new(
+                XgboostProcessor::new(vec_of_rqps, self.model_file_path.clone()),
+            )),
             TypedRasterQueryProcessor::I32(_) => todo!(),
             TypedRasterQueryProcessor::I64(_) => todo!(),
             TypedRasterQueryProcessor::F64(_) => todo!(),
@@ -175,13 +176,6 @@ where
         let n_bands = bands_of_tile.len() as i32;
         let grid_shape = tile.grid_shape();
         let props = tile.properties;
-        // let result = Ok(RasterTile2D::new_with_properties(
-        //     tile.time,
-        //     tile.tile_position,
-        //     tile.global_geo_transform,
-        //     EmptyGrid::new(tile.grid_array.grid_shape(), OUT_NO_DATA_VALUE).into(),
-        //     tile.properties.clone(),
-        // ));
 
         let mut rasters: Vec<_> = bands_of_tile
             .into_iter()
@@ -311,18 +305,6 @@ where
     ) -> Result<BoxStream<'a, Result<Self::Output>>> {
         println!("querying");
 
-        // TODO: better solution for this?
-        // we need to get meta data somehow
-        let source = self.sources.first().unwrap();
-        let mut source_stream = source.query(query, ctx).await.unwrap();
-        let tile = source_stream.next().await.unwrap().unwrap();
-
-        let grid_shp = tile.grid_shape();
-        let time = query.time_interval;
-        let tile_position = tile.tile_position;
-        let global_geo_transform = tile.global_geo_transform;
-        let properties = tile.properties.clone();
-
         let mut band_buffer = Vec::new();
 
         for band in self.sources.iter() {
@@ -332,7 +314,6 @@ where
 
         let zipped_stream_tiled_bands = StreamVectorZip::new(band_buffer);
 
-        // ! --------------------------
         let s: Vec<_> = zipped_stream_tiled_bands.collect().await;
         let strm = stream::iter(s)
             .map(|tile| {
@@ -343,91 +324,6 @@ where
         let rs = strm.and_then(move |tile| self.async_func(tile, ctx.thread_pool().clone()));
 
         Ok(rs.boxed())
-        // ! --------------------------
-        // let zipped_bands: Vec<_> = zipped_stream_tiled_bands.collect().await;
-
-        // let xg_mat_vec = Arc::new(Mutex::new(Vec::new()));
-
-        // let pool = ctx.thread_pool().clone();
-        // zipped_bands.into_iter().for_each(|tile| {
-        //     pool.install(|| {
-        //         println!("spawning");
-        //         let shp = grid_shp.shape_array.clone();
-        //         let n_rows = shp[0] * shp[1];
-        //         let n_cols = tile.len();
-
-        //         // for every tile there are n bands, of which we need to get the underlying data
-        //         let rasters: Vec<_> = tile
-        //             .into_iter()
-        //             .map(|band| {
-        //                 let band_ok = band.unwrap();
-        //                 let mat_tile = band_ok.into_materialized_tile();
-        //                 let pixel_data = mat_tile.grid_array.data;
-        //                 pixel_data
-        //             })
-        //             .collect();
-
-        //         let mut data: Vec<f64> = Vec::new();
-        //         for row in 0..n_rows {
-        //             let mut row_data = Vec::new();
-        //             for col in 0..n_cols {
-        //                 let pixel_value: f64 = rasters.get(col).unwrap().get(row).unwrap().as_();
-        //                 row_data.push(pixel_value);
-        //             }
-
-        //             data.extend_from_slice(&row_data);
-        //         }
-
-        //         let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), data).unwrap();
-
-        //         // define information needed for xgboost
-        //         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-        //         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-        //         let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-        //         let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
-
-        //         // get xgboost style matrices
-        //         let xg_matrix = DMatrix::from_col_major_f64(
-        //             data_arr_2d.as_slice_memory_order().unwrap(),
-        //             byte_size_ax_0,
-        //             byte_size_ax_1,
-        //             n_rows,
-        //             n_cols,
-        //         )
-        //         .unwrap();
-
-        //         let mut out_dim: u64 = 0;
-        //         let shp = &[n_rows as u64, n_cols as u64];
-        //         let bst = Booster::load_buffer(self.model_file.as_bytes()).unwrap();
-        //         let result = bst.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
-
-        //         let no_data = Some(-1000.0);
-        //         let predicted_grid = Grid2D::new(grid_shp, result.unwrap(), no_data)
-        //             .expect("raster creation must succeed");
-
-        //         let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
-        //             RasterTile2D::new_with_properties(
-        //                 time,
-        //                 tile_position,
-        //                 global_geo_transform,
-        //                 predicted_grid.into(),
-        //                 properties.clone(),
-        //             );
-
-        //         xg_mat_vec.lock().unwrap().push(rt);
-        //     });
-        // });
-
-        // let mutex = Arc::try_unwrap(xg_mat_vec).unwrap();
-        // let inn = mutex.into_inner().unwrap();
-        // let s = stream::once(future::ready(Ok(inn)));
-        // let y = s.flat_map(|x: Result<Vec<_>, _>| match x {
-        //     Ok(x) => stream::iter(x).map(|x| Ok(x)).boxed(),
-        //     Err(x) => stream::once(future::ready(Err(x))).boxed(),
-        // });
-
-        // let yy = y.boxed();
-        // Ok(yy)
     }
 }
 
@@ -649,7 +545,6 @@ mod tests {
 
     #[tokio::test]
     async fn xg_op_test() {
-        // TODO: investigate prediction step performance -> parallelize possible?
         // setup data to predict
         let paths = vec![
             "s2_10m_de_marburg/b02.tiff",
@@ -693,7 +588,9 @@ mod tests {
 
         // xg-operator takes the input data for further processing
         let xg = XgboostOperator {
-            params: XgboostParams {},
+            params: XgboostParams {
+                model_file_path: "/workspace/geoengine/operators/model.json".into(),
+            },
             sources: MultipleRasterSources { rasters: srcs },
         };
 
