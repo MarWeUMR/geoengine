@@ -269,11 +269,11 @@ mod tests {
         for _ in 0..training_rounds {
             // generate and fill a reservoir
             println!("generating reservoir");
-            let reservoirs = generate_reservoir(&zipped_data, tile_size, capacity).await;
+            let mut reservoirs = generate_reservoir(&zipped_data, tile_size, capacity).await;
 
             // make xg compatible, trainable datastructure
             println!("generating xg matrix");
-            let xg_matrix = make_xg_data(reservoirs, capacity, &forward_map).await;
+            let xg_matrix = make_xg_data(&mut reservoirs, capacity, &forward_map).await;
 
             // start the training process
             // TODO: num_rounds implementieren
@@ -313,7 +313,6 @@ mod tests {
         wtr.flush().unwrap();
 
         println!("done");
-
     }
 
     /// Debug purpose method
@@ -507,89 +506,59 @@ mod tests {
     /// NOTE: This function assumes, that the last column is the target.
     // TODO: change to index argument?
     async fn make_xg_data(
-        reservoirs: Vec<Vec<f64>>,
+        reservoirs: &mut Vec<Vec<f64>>,
         capacity: usize,
         forward_map: &BTreeMap<String, i32>,
     ) -> DMatrix {
-        let mut tabular_like_data_vec = Vec::new();
+        let target_vec = reservoirs.remove(4);
+        let n_cols = reservoirs.len();
+        let n_rows = reservoirs[0].len();
 
-        let streamed_reservoirs: Vec<_> = reservoirs
-            .clone()
-            .into_iter()
-            .map(|band_reservoir| futures::stream::iter(band_reservoir))
-            .collect();
-
-        let streamed_reservoirs_vec = StreamVectorZip::new(streamed_reservoirs);
-
-        let mut rows: Vec<_> = streamed_reservoirs_vec.collect().await;
-
-        let n_cols = rows.get(0).unwrap().len();
-
-        let mut target_vec = Vec::new();
-        for row in rows.iter_mut() {
-            // split the target value, we dont want it for the training matrix as a column.
-            let target_value = row.pop().unwrap();
-
-            if target_value.eq(&-1000.0) {
-                println!("target value is -1000.0");
+        // build a sequential vector of the data by iterating along the columns for every row
+        // so the data layout should be like: [[r1,c1], [r1,c2], [r1,...], [r2,c1], [r2,c2], ...]
+        let mut sequential_data = Vec::new();
+        for row in 0..n_rows {
+            for col in 0..n_cols {
+                sequential_data.push(reservoirs[col][row]);
             }
-
-            // now we need to check, if there is missing data here.
-            // if that is the case, we pass a nan row
-            // NOTE: this is a band-aid fix.
-            // TODO: handle nans better
-
-            let mut v = Vec::new();
-            for r in row.iter() {
-                if r.eq(&-1000.0) {
-                    v.push(f64::NAN);
-                } else {
-                    v.push(*r);
-                }
-            }
-
-            target_vec.push(target_value);
-            tabular_like_data_vec.extend_from_slice(&v);
         }
 
         // we need to remap the target values to [0, num_classes) for xgboost.
         // otherwise it cant perform multi-class classification.
-
-        let mut target_vec_remapped = Vec::new();
-        for target in target_vec.iter() {
-            let target_value = forward_map.get(format!("{target}").as_str()).unwrap();
-            target_vec_remapped.push(*target_value);
+        let mut labels = Vec::new();
+        for target_val in target_vec.iter() {
+            let target_value = forward_map.get(format!("{target_val}").as_str()).unwrap();
+            labels.push(*target_value as f32);
         }
 
-        assert_eq!(target_vec_remapped.len(), target_vec.len());
+        assert_eq!(labels.len(), target_vec.len());
 
-        let data_arr_2d =
-            Array2::from_shape_vec((capacity, n_cols - 1), tabular_like_data_vec).unwrap();
+        let data_arr_2d = Array2::from_shape_vec((capacity, n_cols), sequential_data).unwrap();
 
         // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
+        println!("strides_ax_0: {}", strides_ax_0);
         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
+        println!("strides_ax_1: {}", strides_ax_1);
         let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
+        println!("byte_size_ax_0: {}", byte_size_ax_0);
         let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
+        println!("byte_size_ax_1: {}", byte_size_ax_1);
+
+        let data_slice_mem_order = data_arr_2d.as_slice_memory_order().unwrap();
 
         // get xgboost style matrices
         let mut xg_matrix = DMatrix::from_col_major_f64(
-            data_arr_2d.as_slice_memory_order().unwrap(),
+            data_slice_mem_order,
             byte_size_ax_0,
             byte_size_ax_1,
             capacity,
-            n_cols - 1 as usize,
+            n_cols as usize,
         )
         .unwrap();
 
         // set labels
-        // TODO: make more generic
-
-        let lbls: Vec<f32> = target_vec_remapped
-            .iter()
-            .map(|elem| *elem as f32)
-            .collect();
-        xg_matrix.set_labels(lbls.as_slice()).unwrap(); // <- here we need the remapped target values
+        xg_matrix.set_labels(&labels.as_slice()).unwrap(); // <- here we need the remapped target values
         xg_matrix
     }
 
