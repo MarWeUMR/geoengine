@@ -302,14 +302,10 @@ mod tests {
         RasterOperator, RasterQueryProcessor, RasterResultDescriptor,
     };
     use crate::mock::{MockRasterSource, MockRasterSourceParams};
-    use crate::processing::meteosat::xgboost::{XgboostOperator, XgboostParams};
-    use crate::processing::meteosat::{
-        new_channel_key, new_offset_key, new_satellite_key, new_slope_key, test_util,
-    };
+
     use crate::source::{
         FileNotFoundHandling, GdalDatasetGeoTransform, GdalDatasetParameters, GdalMetaDataRegular,
-        GdalMetadataMapping, GdalSource, GdalSourceParameters, GdalSourceTimePlaceholder,
-        TimeReference,
+        GdalSource, GdalSourceParameters, GdalSourceTimePlaceholder, TimeReference,
     };
     use csv::Writer;
     use futures::StreamExt;
@@ -319,7 +315,7 @@ mod tests {
         SpatialResolution, TimeGranularity, TimeInstance, TimeInterval, TimeStep,
     };
     use geoengine_datatypes::raster::{
-        GridOrEmpty, RasterDataType, RasterPropertiesEntryType, RasterTile2D, TilingSpecification,
+        GridOrEmpty, RasterDataType, RasterTile2D, TilingSpecification,
     };
     use geoengine_datatypes::spatial_reference::{
         SpatialReference, SpatialReferenceAuthority, SpatialReferenceOption,
@@ -330,6 +326,8 @@ mod tests {
     use num_traits::AsPrimitive;
 
     use std::path::PathBuf;
+
+    use super::{XgboostOperator, XgboostParams};
 
     fn get_gdal_config_metadata(paths: Vec<&str>) -> Vec<GdalMetaDataRegular> {
         let no_data_value = Some(-1000.0);
@@ -361,24 +359,7 @@ mod tests {
                     height: 3431,
                     file_not_found_handling: FileNotFoundHandling::NoData,
                     no_data_value,
-                    properties_mapping: Some(vec![
-                        GdalMetadataMapping::identity(
-                            new_offset_key(),
-                            RasterPropertiesEntryType::Number,
-                        ),
-                        GdalMetadataMapping::identity(
-                            new_slope_key(),
-                            RasterPropertiesEntryType::Number,
-                        ),
-                        GdalMetadataMapping::identity(
-                            new_channel_key(),
-                            RasterPropertiesEntryType::Number,
-                        ),
-                        GdalMetadataMapping::identity(
-                            new_satellite_key(),
-                            RasterPropertiesEntryType::Number,
-                        ),
-                    ]),
+                    properties_mapping: None,
                     gdal_open_options: None,
                     gdal_config_options: None,
                 },
@@ -463,11 +444,8 @@ mod tests {
 
         let mut tile_buffer: Vec<_> = Vec::new();
 
-        let props = test_util::create_properties(None, None, Some(11.0), Some(2.0));
-
         while let Some(processor) = stream.next().await {
-            let mut tile = processor.unwrap();
-            tile.properties = props.clone();
+            let tile = processor.unwrap();
             tile_buffer.push(tile);
         }
 
@@ -484,6 +462,7 @@ mod tests {
 
             println!("n tiles: {:?}", tile_vec.len());
 
+            // todo: not sure what to do with this.
             let measurement = Measurement::Classification {
                 measurement: "water".into(),
                 classes: hashmap!(0 => "Water Bodies".to_string()),
@@ -579,6 +558,7 @@ mod tests {
             }
         }
 
+        // this is only used to verify the result in python plots
         let mut wtr = Writer::from_path("predictions.csv").unwrap();
 
         for elem in all_pixels {
