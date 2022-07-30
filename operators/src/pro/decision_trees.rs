@@ -1,5 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use rand::{
+        distributions::{Distribution, Uniform},
+        thread_rng, Rng,
+    };
 
     use crate::engine::RasterQueryProcessor;
     use crate::processing::meteosat::{
@@ -35,8 +39,6 @@ mod tests {
     use geoengine_datatypes::{raster::RasterPropertiesEntryType, util::Identifier};
     use itertools::{izip, Itertools};
     use ndarray::{arr2, Array2};
-    use rand::distributions::Uniform;
-    use rand::prelude::Distribution;
     use xgboost_bindings::{Booster, DMatrix};
 
     use std::cmp::Ordering;
@@ -227,15 +229,15 @@ mod tests {
     #[tokio::test]
     async fn workflow() {
         // define data to be used
+        // the target should be last
         let paths = [
             "s2_10m_de_marburg/b02.tiff",
             "s2_10m_de_marburg/b03.tiff",
             "s2_10m_de_marburg/b04.tiff",
             "s2_10m_de_marburg/b08.tiff",
+            // put target band at the last slot
             "s2_10m_de_marburg/target.tiff",
         ];
-
-        let target_path = ["s2_10m_de_marburg/target.tiff"];
 
         // define reservoir size
         // TODO: bigger reservoir size than dataset
@@ -254,22 +256,34 @@ mod tests {
 
         // do geoengine magic
         println!("starting geoengine magic");
-        let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
+
+        // this contains Tiles[Bands[Pixelvalues]]
+        let tiles_bands_pixel_vec: Vec<Vec<Vec<f64>>> =
+            get_tiles_bands_pixels_vec(&paths, tile_size).await;
 
         // extract the target band to analyze the unique classes.
-        let zipped_data_target: Vec<f64> = zip_target_to_tiles(&target_path, tile_size).await;
+        let target_vec: Vec<f64> = tiles_bands_pixel_vec
+            .iter()
+            .map(|tile| {
+                let band = tile[paths.len() - 1].clone();
+                band
+            })
+            .flatten()
+            .collect();
 
         // we need a forward map to help xg boost train the classification. The classes need to be in [0, n_classes).
         // we need a backward map to give the predictions back in the original coding.
         // true distribution is only to verify data after training.
-
-        let (forward_map, backward_map, true_distribution_map) = get_hashmaps(zipped_data_target);
+        let (forward_map, backward_map, true_distribution_map) = get_hashmaps(target_vec);
 
         println!("training with a reservoir size of {:?}", capacity);
         for _ in 0..training_rounds {
             // generate and fill a reservoir
             println!("generating reservoir");
-            let mut reservoirs = generate_reservoir(&zipped_data, tile_size, capacity).await;
+            let mut reservoirs =
+                generate_reservoir(&tiles_bands_pixel_vec, tile_size, capacity).await;
+
+            reservoir_test(&tiles_bands_pixel_vec, tile_size, capacity);
 
             // make xg compatible, trainable datastructure
             println!("generating xg matrix");
@@ -281,7 +295,7 @@ mod tests {
         }
 
         // predict data
-        let predictions = predict(booster_vec.pop().unwrap(), &zipped_data)
+        let predictions = predict(booster_vec.pop().unwrap(), &tiles_bands_pixel_vec)
             .await
             .unwrap();
 
@@ -315,39 +329,6 @@ mod tests {
         println!("done");
     }
 
-    /// Debug purpose method
-    async fn zip_target_to_tiles(paths: &[&str], tile_size: usize) -> Vec<f64> {
-        let mut bands: Vec<Vec<Vec<f64>>> = vec![];
-
-        // load each band given by distinct .tif files
-        for path in paths.iter() {
-            let gcm = get_gdal_config_metadata(path);
-            let init_op = initialize_operator(gcm, tile_size).await;
-            let buffer_proc = get_band_data(init_op).await;
-            bands.push(buffer_proc);
-        }
-
-        let streamed_bands: Vec<_> = bands
-            .into_iter()
-            .map(|band| futures::stream::iter(band))
-            .collect();
-
-        let zipped_bands = StreamVectorZip::new(streamed_bands);
-
-        let tiles_of_zipped_bands: Vec<Vec<Vec<f64>>> = zipped_bands.collect().await;
-
-        let mut v = Vec::new();
-
-        for tile in tiles_of_zipped_bands.iter() {
-            let b = tile.get(0).unwrap();
-            for e in b.iter() {
-                v.push(*e);
-            }
-        }
-
-        v
-    }
-
     /// This function takes a slice of paths to 'band_i.tif' files and turns them into a vector of zipped, tiled data.
     /// Each band is tiled in the beginning. The elements per tile are then zipped together, such that a tabular style
     /// result is returned.
@@ -367,7 +348,7 @@ mod tests {
     ///           ]
     ///   ]
 
-    async fn zip_bands_to_tiles(paths: &[&str], tile_size: usize) -> Vec<Vec<Vec<f64>>> {
+    async fn get_tiles_bands_pixels_vec(paths: &[&str], tile_size: usize) -> Vec<Vec<Vec<f64>>> {
         let mut bands: Vec<Vec<Vec<f64>>> = vec![];
 
         // load each band given by distinct .tif files
@@ -567,8 +548,8 @@ mod tests {
         tile_size: usize,
         capacity: usize,
     ) -> Vec<Vec<f64>> {
+        // prepare stuff for the reservoirs
         let mut i = 0;
-
         let num_of_bands = zipped_data.get(0).unwrap().len();
 
         // we need a store for each band's reservoir
@@ -578,17 +559,12 @@ mod tests {
             vec_of_reservoirs.push(band_reservoir);
         }
 
-        let uniform_rand = generate_uniform_rng(0.0, 1.0);
+        let mut w = (generate_uniform_rng(0.0, 1.0).ln() / capacity as f64).exp();
 
-        let mut w = (uniform_rand.ln() / capacity as f64).exp();
-
+        // start filling the reservoirs
+        // we now iterate over all tiles
         for (tile_counter, tile) in zipped_data.iter().enumerate() {
-            // check if next element is in current tile or we can skip this tile
-            if elem_in_this_tile(i, tile_counter, tile_size) == false {
-                continue;
-            }
-
-            // initial fill of the reservoir
+            // as long, as the reservoir is not full, we take any pixel
             if i < capacity {
                 while i < capacity {
                     // we need to "leave" this tile and go to the next. the index exceeds this tile's bounds.
@@ -608,7 +584,13 @@ mod tests {
 
                     i = i + 1;
                 }
+            } else {
+                // check if next element is in current tile or we can skip this tile
+                if is_elem_in_this_tile(i, tile_counter, tile_size) == false {
+                    continue;
+                }
             }
+
             // consecutive fill of the reservoir with random elements
             while i < (tile_counter + 1) * (tile_size * tile_size) {
                 let step = Uniform::new(0, capacity);
@@ -625,13 +607,9 @@ mod tests {
                     reservoir.swap_remove(idx_swap_elem);
                 }
 
-                let uniform_rand = generate_uniform_rng(0.0, 1.0);
+                let rand_step = (generate_uniform_rng(0.0, 1.0).ln() / (1.0 - w).ln()).floor();
 
-                let rand_step = (uniform_rand.ln() / (1.0 - w).ln()).floor();
-
-                let uniform_rand = generate_uniform_rng(0.0, 1.0);
-
-                w = w * (uniform_rand.ln() / capacity as f64).exp();
+                w = w * (generate_uniform_rng(0.0, 1.0).ln() / capacity as f64).exp();
 
                 i = i + 1 + rand_step as usize;
             }
@@ -641,9 +619,10 @@ mod tests {
     }
 
     /// Is the i-th element in the j-th tile?
-    /// True if i is less than i+1 * tile_size.
-    fn elem_in_this_tile(i: usize, tile_counter: usize, tile_size: usize) -> bool {
-        let result = i < (tile_counter + 1) * (tile_size * tile_size);
+    /// True if i is less than (i+1) * tile_size.
+    /// For example: The first 256 elements belong to the 0-th tile, if i < 256 == 1 * 16 * 16.
+    fn is_elem_in_this_tile(i: usize, tile_counter: usize, tile_size: usize) -> bool {
+        let result = i < (tile_counter + 1) * usize::pow(tile_size, 2);
         result
     }
 
@@ -675,7 +654,7 @@ mod tests {
         // setup data/model cache
 
         // do geoengine magic
-        let zipped_data: Vec<Vec<Vec<f64>>> = zip_bands_to_tiles(&paths, tile_size).await;
+        let zipped_data: Vec<Vec<Vec<f64>>> = get_tiles_bands_pixels_vec(&paths, tile_size).await;
 
         // make xg compatible, trainable datastructure
         let xg_matrix = make_xg_data_no_labels(zipped_data).await;
@@ -845,5 +824,69 @@ mod tests {
         }
 
         (forward_map, backward_map, true_distribution_map)
+    }
+
+    fn reservoir_test(zipped_data: &Vec<Vec<Vec<f64>>>, tile_size: usize, capacity: usize) -> Vec<f64> {
+        // reservoir sampling algorithm l
+        let mut i = 0;
+        let mut reservoir = Vec::new();
+
+        let mut tile_counter = 0;
+
+        // filling phase
+        while i < capacity {
+            if is_elem_in_this_tile(i, tile_counter, tile_size) {
+                match zipped_data.iter().nth(tile_counter) {
+                    Some(bands_of_this_tile) => {
+                        let elem_idx_in_this_tile = i - ((tile_counter) * usize::pow(tile_size, 2));
+
+                        assert!(
+                            elem_idx_in_this_tile < usize::pow(tile_size, 2)
+                                && elem_idx_in_this_tile >= 0
+                        );
+                        reservoir.push(bands_of_this_tile[0][elem_idx_in_this_tile]);
+                        i += 1;
+                    }
+                    None => break,
+                }
+            } else {
+                // we need to skip this tile
+                tile_counter += 1;
+                continue;
+            }
+        }
+
+        // random phase
+        let mut rng = rand::thread_rng();
+        let unit_interval = Uniform::from(0.0f64..1.0f64);
+        let capacity_interval = Uniform::from(0..capacity);
+
+        let mut w = (unit_interval.sample(&mut rng).ln() / capacity as f64).exp();
+        loop {
+            match zipped_data.iter().nth(tile_counter) {
+                Some(bands_of_this_tile) => {
+                    i = i
+                        + 1
+                        + ((unit_interval.sample(&mut rng).ln() / (1.0 - w).ln()).floor() as usize);
+                    // select index to swap on
+                    let rnd_idx = capacity_interval.sample(&mut rng);
+                    let elem_idx_in_this_tile = i - (tile_counter * usize::pow(tile_size, 2));
+                    assert!(
+                        elem_idx_in_this_tile < usize::pow(tile_size, 2)
+                            && elem_idx_in_this_tile >= 0
+                    );
+
+                    // swap element
+                    reservoir[rnd_idx] = bands_of_this_tile[0][elem_idx_in_this_tile];
+
+                    w *= (generate_uniform_rng(0.0, 1.0).ln() / capacity as f64).exp();
+                }
+                None => break,
+            }
+        }
+
+        reservoir
+
+
     }
 }
