@@ -1,33 +1,23 @@
-use itertools::izip;
-use rayon::collections::vec_deque::IterMut;
 use rayon::prelude::*;
-use rayon::vec::IntoIter;
 use std::mem;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::time::Instant;
 
-use crate::error::Error;
 use crate::util::stream_zip::StreamVectorZip;
 use async_trait::async_trait;
 use futures::stream;
 use futures::stream::BoxStream;
-use futures::stream::FuturesOrdered;
 use futures::{future, StreamExt};
 
 use futures::TryStreamExt;
 use geoengine_datatypes::hashmap;
 use geoengine_datatypes::primitives::{Measurement, RasterQueryRectangle, SpatialPartition2D};
-use geoengine_datatypes::raster::EmptyGrid;
 use geoengine_datatypes::raster::{
     BaseTile, Grid2D, GridOrEmpty, GridShape, GridShapeAccess, Pixel, RasterDataType, RasterTile2D,
 };
 use ndarray::Array2;
 
-use rayon::iter::IndexedParallelIterator;
-use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
-use rayon::iter::Zip;
 use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
 use xgboost_bindings::{Booster, DMatrix};
@@ -43,7 +33,6 @@ use RasterDataType::F32 as RasterOut;
 
 use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 
-// TODO: what to do with this?
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct XgboostParams {
@@ -51,6 +40,7 @@ pub struct XgboostParams {
 }
 
 pub type XgboostOperator = Operator<XgboostParams, MultipleRasterSources>;
+pub type Tile<P> = BaseTile<GridOrEmpty<GridShape<[usize; 2]>, P>>;
 
 pub struct InitializedXgboostOperator {
     result_descriptor: RasterResultDescriptor,
@@ -80,7 +70,7 @@ impl RasterOperator for XgboostOperator {
         .await
         .unwrap();
 
-        let input = init_rasters.get(0).unwrap().clone();
+        let input = init_rasters.get(0).unwrap();
         let in_desc = input.result_descriptor();
 
         let out_desc = RasterResultDescriptor {
@@ -125,17 +115,10 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
                 vec_of_rqps,
                 self.model_file_path.clone(),
             ))),
-            TypedRasterQueryProcessor::U8(_) => todo!(),
-            TypedRasterQueryProcessor::U16(_) => todo!(),
-            TypedRasterQueryProcessor::U32(_) => todo!(),
-            TypedRasterQueryProcessor::U64(_) => todo!(),
-            TypedRasterQueryProcessor::I8(_) => todo!(),
             TypedRasterQueryProcessor::I16(_) => QueryProcessorOut(Box::new(
                 XgboostProcessor::new(vec_of_rqps, self.model_file_path.clone()),
             )),
-            TypedRasterQueryProcessor::I32(_) => todo!(),
-            TypedRasterQueryProcessor::I64(_) => todo!(),
-            TypedRasterQueryProcessor::F64(_) => todo!(),
+            _ => todo!(),
         };
         Ok(typed_rqp)
     }
@@ -161,11 +144,9 @@ where
         }
     }
 
-    async fn async_func(
+    async fn process_tile_async(
         &self,
-        bands_of_tile: Vec<
-            Result<BaseTile<GridOrEmpty<GridShape<[usize; 2]>, P>>, crate::error::Error>,
-        >,
+        bands_of_tile: Vec<Result<Tile<P>, crate::error::Error>>,
         pool: Arc<ThreadPool>,
     ) -> Result<RasterTile2D<PixelOut>> {
         println!("async_func");
@@ -177,25 +158,25 @@ where
         let grid_shape = tile.grid_shape();
         let props = tile.properties;
 
-        let mut rasters: Vec<_> = bands_of_tile
+        let rasters: Vec<Vec<f64>> = bands_of_tile
             .into_iter()
             .map(|band| {
                 let band_ok = band.unwrap();
                 let mat_tile = band_ok.into_materialized_tile();
-                let pixel_data = mat_tile
+
+                mat_tile
                     .grid_array
                     .data
                     .into_iter()
-                    .map(|x| x.as_())
-                    .collect::<Vec<f64>>();
-                pixel_data
+                    .map(num_traits::AsPrimitive::as_)
+                    .collect::<Vec<f64>>()
             })
             .collect();
 
-        let mut pixels: Vec<_> = Vec::new();
+        let mut pixels: Vec<f64> = Vec::new();
 
         for row in 0..(n_rows * n_cols) {
-            let mut row_data: Vec<_> = Vec::new();
+            let mut row_data: Vec<f64> = Vec::new();
             for col in 0..n_bands {
                 let pxl = rasters
                     .get(col as usize)
@@ -210,13 +191,7 @@ where
 
         let x = self.model_file.clone();
         let predicted_grid = crate::util::spawn_blocking(move || {
-            process_tile(
-                pixels,
-                &pool,
-                x.as_bytes(),
-                grid_shape.clone(),
-                n_bands as usize,
-            )
+            process_tile(&pixels, &pool, x.as_bytes(), grid_shape, n_bands as usize)
         })
         .await
         .unwrap();
@@ -235,19 +210,17 @@ where
 }
 
 fn process_tile(
-    bands_of_tile: Vec<f64>,
+    bands_of_tile: &Vec<f64>,
     pool: &ThreadPool,
     model_file: &[u8],
     grid_shape: GridShape<[usize; 2]>,
     n_bands: usize,
 ) -> geoengine_datatypes::raster::Grid<GridShape<[usize; 2]>, f32> {
-    let p = pool.install(|| {
+    pool.install(|| {
         println!(
             "processing tile with thread {:?}",
             pool.current_thread_index()
         );
-        let n_rows = grid_shape.shape_array[0];
-        let n_cols = grid_shape.shape_array[1];
         let chunk_size = 64 * 64;
         let res: Vec<_> = bands_of_tile
             .par_chunks(n_bands * chunk_size)
@@ -285,8 +258,7 @@ fn process_tile(
             .collect();
 
         Grid2D::new(grid_shape, res, Some(OUT_NO_DATA_VALUE)).expect("raster creation must succeed")
-    });
-    p
+    })
 }
 
 #[async_trait]
@@ -307,7 +279,7 @@ where
 
         let mut band_buffer = Vec::new();
 
-        for band in self.sources.iter() {
+        for band in &self.sources {
             let stream = band.query(query, ctx).await.unwrap();
             band_buffer.push(stream);
         }
@@ -315,13 +287,9 @@ where
         let zipped_stream_tiled_bands = StreamVectorZip::new(band_buffer);
 
         let s: Vec<_> = zipped_stream_tiled_bands.collect().await;
-        let strm = stream::iter(s)
-            .map(|tile| {
-                let r = Ok(tile);
-                r
-            })
-            .boxed();
-        let rs = strm.and_then(move |tile| self.async_func(tile, ctx.thread_pool().clone()));
+        let strm = stream::iter(s).map(Ok).boxed();
+        let rs =
+            strm.and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
 
         Ok(rs.boxed())
     }
@@ -368,7 +336,7 @@ mod tests {
 
         let mut gmdr = Vec::new();
 
-        for path in paths.iter() {
+        for path in paths {
             let gdal_config_metadata = GdalMetaDataRegular {
                 result_descriptor: RasterResultDescriptor {
                     data_type: RasterDataType::I16,
@@ -385,7 +353,7 @@ mod tests {
                     file_path: PathBuf::from(test_data!(path)),
                     rasterband_channel: 1,
                     geo_transform: GdalDatasetGeoTransform {
-                        origin_coordinate: (474112.0, 5646336.0).into(),
+                        origin_coordinate: (474_112.0, 5_646_336.0).into(),
                         x_pixel_size: 10.0,
                         y_pixel_size: -10.0,
                     },
@@ -421,7 +389,7 @@ mod tests {
 
                     }
                 },
-                start: TimeInstance::from_millis(1072917000000).unwrap(),
+                start: TimeInstance::from_millis(1_072_917_000_000).unwrap(),
                 step: TimeStep {
                     granularity: TimeGranularity::Minutes,
                     step: 15,
@@ -479,22 +447,19 @@ mod tests {
         let ctx = MockQueryContext::test_default();
 
         let query_bbox = SpatialPartition2D::new(
-            (474112.000, 5646336.000).into(),
-            (522752.000, 5612026.000).into(),
+            (474_112.000, 5_646_336.000).into(),
+            (522_752.000, 5_612_026.000).into(),
         )
         .unwrap();
         let query_spatial_resolution = SpatialResolution::new(10.0, 10.0).unwrap();
 
         let qry_rectangle = QueryRectangle {
             spatial_bounds: query_bbox,
-            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
+            time_interval: TimeInterval::new(1_590_969_600_000, 1_590_969_600_000).unwrap(),
             spatial_resolution: query_spatial_resolution,
         };
 
-        let mut stream = rqp_gt
-            .raster_query(qry_rectangle.clone(), &ctx)
-            .await
-            .unwrap();
+        let mut stream = rqp_gt.raster_query(qry_rectangle, &ctx).await.unwrap();
 
         let mut tile_buffer: Vec<_> = Vec::new();
 
@@ -509,11 +474,11 @@ mod tests {
         tile_buffer
     }
 
-    /// Build a MockRasterSource to use with the operator
+    /// Build a `MockRasterSource` to use with the operator
     async fn get_src(gcm_vec: Vec<GdalMetaDataRegular>) -> Vec<Box<dyn RasterOperator>> {
         let mut src_vec = Vec::new();
 
-        for gcm in gcm_vec.into_iter() {
+        for gcm in gcm_vec {
             let init_op = initialize_operator(gcm, 512).await;
             let tile_vec = get_band_data(init_op).await;
 
@@ -570,8 +535,8 @@ mod tests {
         ctx.add_meta_data(id.clone(), Box::new(gcm.first().unwrap().clone()));
 
         let query_bbox = SpatialPartition2D::new(
-            (474112.000, 5646336.000).into(),
-            (522752.000, 5612026.000).into(),
+            (474_112.000, 5_646_336.000).into(),
+            (522_752.000, 5_612_026.000).into(),
         )
         .unwrap();
 
@@ -579,17 +544,20 @@ mod tests {
 
         let qry_rectangle = RasterQueryRectangle {
             spatial_bounds: query_bbox,
-            time_interval: TimeInterval::new(1590969600000, 1590969600000).unwrap(),
+            time_interval: TimeInterval::new(1_590_969_600_000, 1_590_969_600_000).unwrap(),
             spatial_resolution: query_spatial_resolution,
         };
 
         // this operator prepares the input data
         let srcs = get_src(gcm.clone()).await;
 
+        let work_dir = std::env::current_dir().unwrap();
+        let model_path = work_dir.join("model.json").display().to_string();
+
         // xg-operator takes the input data for further processing
         let xg = XgboostOperator {
             params: XgboostParams {
-                model_file_path: "/workspace/geoengine/operators/model.json".into(),
+                model_file_path: model_path,
             },
             sources: MultipleRasterSources { rasters: srcs },
         };
@@ -604,16 +572,16 @@ mod tests {
 
         let mut all_pixels = Vec::new();
 
-        for tile in result.into_iter() {
+        for tile in result {
             let data_of_tile = tile.unwrap().into_materialized_tile().grid_array.data;
-            for pixel in data_of_tile.iter() {
+            for pixel in &data_of_tile {
                 all_pixels.push(*pixel);
             }
         }
 
         let mut wtr = Writer::from_path("predictions.csv").unwrap();
 
-        for elem in all_pixels.into_iter() {
+        for elem in all_pixels {
             let num = format!("{elem}");
             wtr.write_record(&[&num]).unwrap();
         }
