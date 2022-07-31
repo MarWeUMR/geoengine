@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow() {
+    async fn training_workflow() {
         // define data to be used
         // the target should be last
         let paths = [
@@ -232,7 +232,7 @@ mod tests {
 
         // define reservoir size
         // TODO: bigger reservoir size than dataset
-        let capacity = calculate_reservoir_size(1, "mb", paths.len(), mem::size_of::<f64>());
+        let capacity = calculate_reservoir_size(1, "gb", paths.len(), mem::size_of::<f64>());
 
         // how many rounds should be trained?
         let training_rounds = 2;
@@ -267,13 +267,12 @@ mod tests {
         for _ in 0..training_rounds {
             // generate and fill a reservoir
             println!("generating reservoir");
-            //let mut reservoirs = generate_reservoir(&tiles_bands_pixel_vec, tile_size, capacity);
 
             let mut reservoirs = generate_reservoir(&tiles_bands_pixel_vec, tile_size, capacity);
 
             // make xg compatible, trainable datastructure
             println!("generating xg matrix");
-            let xg_matrix = make_xg_data(&mut reservoirs, capacity, &forward_map);
+            let xg_matrix = make_xg_data(&mut reservoirs, &forward_map);
 
             // start the training process
             // TODO: num_rounds implementieren
@@ -392,10 +391,10 @@ mod tests {
     // TODO: change to index argument?
     fn make_xg_data(
         reservoirs: &mut Vec<Vec<f64>>,
-        capacity: usize,
         forward_map: &BTreeMap<String, i32>,
     ) -> DMatrix {
-        let target_vec = reservoirs.remove(4);
+        // assuming the last column is the target
+        let target_vec = reservoirs.remove(reservoirs.len() - 1);
         let n_cols = reservoirs.len();
         let n_rows = reservoirs[0].len();
 
@@ -418,7 +417,7 @@ mod tests {
 
         assert_eq!(labels.len(), target_vec.len());
 
-        let data_arr_2d = Array2::from_shape_vec((capacity, n_cols), sequential_data).unwrap();
+        let data_arr_2d = Array2::from_shape_vec((n_rows, n_cols), sequential_data).unwrap();
 
         // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
@@ -437,8 +436,8 @@ mod tests {
             data_slice_mem_order,
             byte_size_ax_0,
             byte_size_ax_1,
-            capacity,
-            n_cols as usize,
+            n_rows,
+            n_cols,
         )
         .unwrap();
 
