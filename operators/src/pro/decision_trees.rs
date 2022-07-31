@@ -1,10 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use rand::{
-        distributions::{Distribution, Uniform},
-        rngs::StdRng,
-        SeedableRng,
-    };
+    use rand::distributions::{Distribution, Uniform};
 
     use crate::engine::RasterQueryProcessor;
     use crate::processing::meteosat::{
@@ -453,15 +449,6 @@ mod tests {
         i < (tile_counter + 1) * usize::pow(tile_size, 2)
     }
 
-    fn generate_uniform_rng(from: f64, to: f64) -> f64 {
-        let step = Uniform::new(from, to);
-
-        let mut rng = StdRng::seed_from_u64(42);
-        //let mut rng = rand::thread_rng();
-        let choice: f64 = step.sample(&mut rng);
-        choice
-    }
-
     fn get_hashmaps(zipped_data_target: &Vec<f64>) -> BTreeMap<String, i32> {
         let mut forward_map = BTreeMap::new();
         let mut num_classes = 0;
@@ -495,7 +482,7 @@ mod tests {
         let mut tile_counter = 0;
 
         // filling phase
-        while let Some(tile) = zipped_data.get(tile_counter) {
+        'outer: while let Some(tile) = zipped_data.get(tile_counter) {
             for pxl in 0..usize::pow(tile_size, 2) {
                 // fill the reservoirs with data
                 for (j, reservoir) in vec_of_reservoirs.iter_mut().enumerate() {
@@ -505,14 +492,11 @@ mod tests {
                 }
 
                 if i == capacity - 1 {
-                    break;
+                    break 'outer;
                 }
                 i += 1;
             }
 
-            if i == capacity - 1 {
-                break;
-            }
             tile_counter += 1;
         }
 
@@ -547,7 +531,7 @@ mod tests {
                     reservoir[rnd_idx] = next_band_element;
                 }
 
-                w *= (generate_uniform_rng(0.0, 1.0).ln() / capacity as f64).exp();
+                w *= (unit_interval.sample(&mut rng).ln() / capacity as f64).exp();
             }
         }
 
