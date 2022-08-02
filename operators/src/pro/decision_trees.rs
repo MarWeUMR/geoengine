@@ -434,6 +434,8 @@ mod tests {
             byte_size_ax_1,
             n_rows,
             n_cols,
+            -1,
+            0.0,
         )
         .unwrap();
 

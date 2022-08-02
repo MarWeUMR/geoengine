@@ -158,6 +158,7 @@ where
         let grid_shape = tile.grid_shape();
         let props = tile.properties;
 
+        // extract the actual data from the tiles
         let rasters: Vec<Vec<f64>> = bands_of_tile
             .into_iter()
             .map(|band| {
@@ -189,9 +190,15 @@ where
             pixels.extend_from_slice(&row_data);
         }
 
-        let x = self.model_file.clone();
+        let model = self.model_file.clone();
         let predicted_grid = crate::util::spawn_blocking(move || {
-            process_tile(&pixels, &pool, x.as_bytes(), grid_shape, n_bands as usize)
+            process_tile(
+                &pixels,
+                &pool,
+                model.as_bytes(),
+                grid_shape,
+                n_bands as usize,
+            )
         })
         .await
         .unwrap();
@@ -221,37 +228,37 @@ fn process_tile(
             "processing tile with thread {:?}",
             pool.current_thread_index()
         );
-        let chunk_size = 64 * 64;
-        let res: Vec<_> = bands_of_tile
-            .par_chunks(n_bands * chunk_size)
-            .map(|elem| {
-                let v = Vec::from(elem);
-                let true_chunk_size = v.len() / n_bands;
-                println!("chunk size: {:?}", v.len());
-                let data_arr_2d = Array2::from_shape_vec((true_chunk_size, n_bands), v).unwrap();
-                let strides_ax_0 = data_arr_2d.strides()[0] as usize;
-                let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-                let byte_size_ax_0 = mem::size_of::<f64>() * strides_ax_0;
-                let byte_size_ax_1 = mem::size_of::<f64>() * strides_ax_1;
 
+        // to get one row of data means taking (n_pixels * n_bands) elements
+        let n_parallel_pixels = grid_shape.shape_array[0] * grid_shape.shape_array[1];
+        let chunk_size = n_bands * n_parallel_pixels;
+
+        let res: Vec<_> = bands_of_tile
+            .par_chunks(chunk_size)
+            .map(|elem| {
                 // get xgboost style matrices
                 let xg_matrix = DMatrix::from_col_major_f64(
-                    data_arr_2d.as_slice_memory_order().unwrap(),
-                    byte_size_ax_0,
-                    byte_size_ax_1,
-                    true_chunk_size,
+                    elem,
+                    mem::size_of::<f64>() * n_bands,
+                    mem::size_of::<f64>(),
+                    n_parallel_pixels,
                     n_bands,
+                    -1,
+                    0.0,
                 )
                 .unwrap();
 
                 let mut out_dim: u64 = 0;
-                let shp = &[true_chunk_size as u64, n_bands as u64];
                 let bst = Booster::load_buffer(model_file).unwrap();
                 // measure time for prediction
-                let start = Instant::now();
-                let result = bst.predict_from_dmat(&xg_matrix, shp, &mut out_dim);
-                let end = start.elapsed();
-                println!("prediction time: {:?}", end);
+                //let start = Instant::now();
+                let result = bst.predict_from_dmat(
+                    &xg_matrix,
+                    &[n_parallel_pixels as u64, n_bands as u64],
+                    &mut out_dim,
+                );
+                //let end = start.elapsed();
+                //println!("prediction time: {:?}", end);
                 result.unwrap()
             })
             .flatten_iter()
@@ -284,12 +291,12 @@ where
             band_buffer.push(stream);
         }
 
-        let zipped_stream_tiled_bands = StreamVectorZip::new(band_buffer);
+        let svz = StreamVectorZip::new(band_buffer);
 
-        let s: Vec<_> = zipped_stream_tiled_bands.collect().await;
-        let strm = stream::iter(s).map(Ok).boxed();
-        let rs =
-            strm.and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
+        let svz_vec: Vec<_> = svz.collect().await;
+        let stream_of_tiles_with_zipped_bands = stream::iter(svz_vec).map(Ok).boxed();
+        let rs = stream_of_tiles_with_zipped_bands
+            .and_then(move |tile| self.process_tile_async(tile, ctx.thread_pool().clone()));
 
         Ok(rs.boxed())
     }
