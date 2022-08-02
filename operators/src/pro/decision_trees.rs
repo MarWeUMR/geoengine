@@ -258,6 +258,7 @@ mod tests {
         // we need a backward map to give the predictions back in the original coding.
         // true distribution is only to verify data after training.
         let forward_map = get_hashmaps(&target_vec);
+        println!("forward map: {:?}", forward_map);
 
         println!("training with a reservoir size of {:?}", capacity);
         for _ in 0..training_rounds {
@@ -435,7 +436,7 @@ mod tests {
             n_rows,
             n_cols,
             -1,
-            0.0,
+            -1000.0,
         )
         .unwrap();
 

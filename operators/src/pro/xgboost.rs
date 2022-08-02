@@ -224,11 +224,6 @@ fn process_tile(
     n_bands: usize,
 ) -> geoengine_datatypes::raster::Grid<GridShape<[usize; 2]>, f32> {
     pool.install(|| {
-        println!(
-            "processing tile with thread {:?}",
-            pool.current_thread_index()
-        );
-
         // to get one row of data means taking (n_pixels * n_bands) elements
         let n_parallel_pixels = grid_shape.shape_array[0] * grid_shape.shape_array[1];
         let chunk_size = n_bands * n_parallel_pixels;
@@ -497,11 +492,18 @@ mod tests {
     #[tokio::test]
     async fn xg_op_test() {
         // setup data to predict
+        // let paths = vec![
+        //     "s2_10m_de_marburg/b02.tiff",
+        //     "s2_10m_de_marburg/b03.tiff",
+        //     "s2_10m_de_marburg/b04.tiff",
+        //     "s2_10m_de_marburg/b08.tiff",
+        // ];
+
         let paths = vec![
-            "s2_10m_de_marburg/b02.tiff",
-            "s2_10m_de_marburg/b03.tiff",
-            "s2_10m_de_marburg/b04.tiff",
-            "s2_10m_de_marburg/b08.tiff",
+            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b02_2020-08-01_0__36days_mean_de_marburg.tiff",
+            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b03_2020-08-01_0__36days_mean_de_marburg.tiff",
+            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b04_2020-08-01_0__36days_mean_de_marburg.tiff",
+            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b08_2020-08-01_0__36days_mean_de_marburg.tiff",
         ];
 
         // setup context and meta data
