@@ -1,9 +1,6 @@
 {
   "properties": {
-    "id": {
-      "type": "internal",
-      "datasetId": "36574dc3-560a-4b09-9d22-d5945f2b8093"
-    },
+    "id": "36574dc3-560a-4b09-9d22-d5945f2b8093",
     "name": "NDVI",
     "description": "NDVI data from MODIS",
     "sourceOperator": "GdalSource",
@@ -286,9 +283,9 @@
       "dataType": "U8",
       "spatialReference": "EPSG:4326",
       "measurement": {
-        "type": "unitless"
+        "type": "continuous",
+        "measurement": "vegetation"
       },
-      "noDataValue": 0.0,
       "time": {
         "start": "2014-01-01T00:00:00.000Z",
         "end": "2014-07-01T00:00:00.000Z"
@@ -320,7 +317,10 @@
         "reference": "start"
       }
     },
-    "start": "2014-01-01T00:00:00.000Z",
+    "dataTime": {
+      "start": "2014-01-01T00:00:00.000Z",
+      "end": "2014-07-01T00:00:00.000Z"
+    },
     "step": {
       "granularity": "months",
       "step": 1

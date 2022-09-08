@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use gdal::errors::GdalError;
-use geoengine_datatypes::dataset::DatasetProviderId;
 use snafu::Snafu;
 
-use geoengine_datatypes::error::ErrorSource;
+use geoengine_datatypes::{dataset::DataProviderId, error::ErrorSource};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -36,6 +35,9 @@ pub enum NetCdfCf4DProviderError {
     MissingEntities {
         source: GdalError,
     },
+    MissingTimeDimension {
+        source: GdalError,
+    },
     MissingGroupName,
     MissingFileName,
     NoTitleForGroup {
@@ -50,6 +52,9 @@ pub enum NetCdfCf4DProviderError {
     },
     CannotParseTimeCoverageDate {
         source: Box<dyn ErrorSource>,
+    },
+    CannotComputeMinMax {
+        source: GdalError,
     },
     TimeCoverageYearOverflows {
         year: i32,
@@ -71,16 +76,19 @@ pub enum NetCdfCf4DProviderError {
     GeneratingParametersFromDataset {
         source: geoengine_operators::error::Error,
     },
+    InvalidTimeCoverageInstant {
+        source: geoengine_datatypes::error::Error,
+    },
     InvalidTimeCoverageInterval {
         source: geoengine_datatypes::error::Error,
     },
     CannotCalculateStepsInTimeCoverageInterval {
         source: geoengine_datatypes::error::Error,
     },
-    InvalidExternalDatasetId {
-        provider: DatasetProviderId,
+    InvalidExternalDataId {
+        provider: DataProviderId,
     },
-    InvalidDatasetIdLength {
+    InvalidDataIdLength {
         length: usize,
     },
     InvalidDatasetIdFile {
@@ -132,7 +140,10 @@ pub enum NetCdfCf4DProviderError {
         source: geoengine_datatypes::error::Error,
     },
     DatasetIsNotInProviderPath {
-        source: std::path::StripPrefixError,
+        source: Box<dyn ErrorSource>,
+    },
+    FileIsNotInProviderPath {
+        file: String,
     },
     CannotRetrieveUnit {
         source: GdalError,
@@ -161,4 +172,48 @@ pub enum NetCdfCf4DProviderError {
     CannotGenerateLoadingInfo {
         source: Box<dyn ErrorSource>,
     },
+    InvalidCollectionId {
+        id: String,
+    },
+
+    #[snafu(display("Cannot parse NetCDF file metadata: {source}"))]
+    CannotParseNetCdfFile {
+        source: Box<dyn ErrorSource>,
+    },
+    #[snafu(display("Cannot lookup dataset with id {id}"))]
+    CannotLookupDataset {
+        id: String,
+    },
+    #[snafu(display("Cannot find NetCdfCf provider with id {id}"))]
+    NoNetCdfCfProviderForId {
+        id: DataProviderId,
+    },
+    NoNetCdfCfProviderAvailable,
+    #[snafu(display("NetCdfCf provider with id {id} cannot list files"))]
+    CdfCfProviderCannotListFiles {
+        id: DataProviderId,
+    },
+    #[snafu(display("Internal server error"))]
+    Internal {
+        source: Box<dyn ErrorSource>,
+    },
+    CannotCreateInProgressFlag {
+        source: Box<dyn ErrorSource>,
+    }, //
+    CannotRemoveInProgressFlag {
+        source: Box<dyn ErrorSource>,
+    },
+    NoOverviewsGeneratedForSource {
+        path: String,
+    },
+    CannotRemoveOverviewsWhileCreationIsInProgress,
+    CannotRemoveOverviews {
+        source: Box<dyn ErrorSource>,
+    },
+    #[snafu(display("NetCdfCf provider cannot create overviews"))]
+    CannotCreateOverview {
+        dataset: PathBuf,
+        source: Box<dyn ErrorSource>,
+    },
+    UnsupportedMetaDataDefinition,
 }

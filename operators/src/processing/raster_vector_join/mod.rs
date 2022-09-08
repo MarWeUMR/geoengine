@@ -5,7 +5,7 @@ mod util;
 
 use crate::engine::{
     ExecutionContext, InitializedRasterOperator, InitializedVectorOperator, Operator,
-    SingleVectorMultipleRasterSources, TypedVectorQueryProcessor, VectorOperator,
+    SingleVectorMultipleRasterSources, TypedVectorQueryProcessor, VectorColumnInfo, VectorOperator,
     VectorQueryProcessor, VectorResultDescriptor,
 };
 use crate::error::{self, Error};
@@ -151,7 +151,13 @@ impl VectorOperator for RasterVectorJoin {
                     }
                     TemporalAggregationMethod::Mean => FeatureDataType::Float,
                 };
-                columns.insert(new_column_name.clone(), feature_data_type);
+                columns.insert(
+                    new_column_name.clone(),
+                    VectorColumnInfo {
+                        data_type: feature_data_type,
+                        measurement: raster_sources[i].result_descriptor().measurement.clone(),
+                    },
+                );
             }
             columns
         });
@@ -269,7 +275,7 @@ mod tests {
     use crate::util::gdal::add_ndvi_dataset;
     use futures::StreamExt;
     use geoengine_datatypes::collections::{FeatureCollectionInfos, MultiPointCollection};
-    use geoengine_datatypes::dataset::DatasetId;
+    use geoengine_datatypes::dataset::DataId;
     use geoengine_datatypes::primitives::{
         BoundingBox2D, DataRef, DateTime, FeatureDataRef, MultiPoint, SpatialResolution,
         TimeInterval, VectorQueryRectangle,
@@ -304,7 +310,8 @@ mod tests {
                     "type": "MockFeatureCollectionSourceMultiPoint",
                     "params": {
                         "collections": [],
-                        "spatialReference": "EPSG:4326"
+                        "spatialReference": "EPSG:4326",
+                        "measurements": {},
                     }
                 },
                 "rasters": [],
@@ -317,9 +324,9 @@ mod tests {
         assert_eq!(deserialized.params, raster_vector_join.params);
     }
 
-    fn ndvi_source(id: DatasetId) -> Box<dyn RasterOperator> {
+    fn ndvi_source(id: DataId) -> Box<dyn RasterOperator> {
         let gdal_source = GdalSource {
-            params: GdalSourceParameters { dataset: id },
+            params: GdalSourceParameters { data: id },
         };
 
         gdal_source.boxed()
