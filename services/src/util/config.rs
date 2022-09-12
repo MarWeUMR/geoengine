@@ -205,6 +205,16 @@ impl ConfigElement for DatasetService {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TaskManager {
+    pub list_limit: u32,
+    pub list_default_limit: u32,
+}
+
+impl ConfigElement for TaskManager {
+    const KEY: &'static str = "task_manager";
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Upload {
     pub path: PathBuf,
 }
@@ -319,6 +329,8 @@ impl ConfigElement for DataProvider {
 #[derive(Debug, Deserialize)]
 pub struct Gdal {
     pub compression_num_threads: GdalCompressionNumThreads,
+    pub compression_z_level: Option<u8>,
+    pub compression_algorithm: Option<Box<str>>,
 }
 
 impl ConfigElement for Gdal {
@@ -334,18 +346,6 @@ pub struct Session {
 
 impl ConfigElement for Session {
     const KEY: &'static str = "session";
-}
-
-#[cfg(feature = "ebv")]
-#[derive(Debug, Deserialize)]
-pub struct Ebv {
-    #[serde(deserialize_with = "deserialize_base_url")]
-    pub api_base_url: url::Url,
-}
-
-#[cfg(feature = "ebv")]
-impl ConfigElement for Ebv {
-    const KEY: &'static str = "ebv";
 }
 
 #[cfg(feature = "nfdi")]

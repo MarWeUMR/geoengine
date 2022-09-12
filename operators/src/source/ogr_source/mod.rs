@@ -16,7 +16,7 @@ use futures::task::Context;
 use futures::{ready, Stream, StreamExt};
 use futures::{Future, FutureExt};
 use gdal::vector::sql::ResultSet;
-use gdal::vector::{Feature, FieldValue, Layer, LayerCaps, OGRwkbGeometryType};
+use gdal::vector::{Feature, FieldValue, Layer, LayerAccess, LayerCaps, OGRwkbGeometryType};
 use log::debug;
 use pin_project::pin_project;
 use postgres_protocol::escape::{escape_identifier, escape_literal};
@@ -36,7 +36,7 @@ use geoengine_datatypes::primitives::{
 };
 use geoengine_datatypes::util::arrow::ArrowTyped;
 
-use crate::engine::{OperatorDatasets, QueryProcessor};
+use crate::engine::{OperatorData, OperatorName, QueryProcessor};
 use crate::error::Error;
 use crate::util::input::StringOrNumberRange;
 use crate::util::Result;
@@ -49,7 +49,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use gdal::errors::GdalError;
-use geoengine_datatypes::dataset::DatasetId;
+use geoengine_datatypes::dataset::DataId;
 use std::convert::{TryFrom, TryInto};
 
 use self::dataset_iterator::OgrDatasetIterator;
@@ -57,7 +57,7 @@ use self::dataset_iterator::OgrDatasetIterator;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OgrSourceParameters {
-    pub dataset: DatasetId,
+    pub data: DataId,
     pub attribute_projection: Option<Vec<String>>,
     pub attribute_filters: Option<Vec<AttributeFilter>>,
 }
@@ -70,13 +70,17 @@ pub struct AttributeFilter {
     pub keep_nulls: bool,
 }
 
-impl OperatorDatasets for OgrSourceParameters {
-    fn datasets_collect(&self, datasets: &mut Vec<DatasetId>) {
-        datasets.push(self.dataset.clone());
+impl OperatorData for OgrSourceParameters {
+    fn data_ids_collect(&self, data_ids: &mut Vec<DataId>) {
+        data_ids.push(self.data.clone());
     }
 }
 
 pub type OgrSource = SourceOperator<OgrSourceParameters>;
+
+impl OperatorName for OgrSource {
+    const TYPE_NAME: &'static str = "OgrSource";
+}
 
 ///  - `file_name`: path to the input file
 ///  - `layer_name`: name of the layer to load
@@ -352,27 +356,27 @@ impl VectorOperator for OgrSource {
 
         let info: Box<
             dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>,
-        > = context.meta_data(&self.params.dataset).await?;
+        > = context.meta_data(&self.params.data).await?;
 
         let result_descriptor = info.result_descriptor().await?;
 
         if let Some(ref attribute_filters) = self.params.attribute_filters {
             for filter in attribute_filters {
-                if let Some(column_type) = result_descriptor.columns.get(&filter.attribute) {
+                if let Some(column_type) = result_descriptor.column_data_type(&filter.attribute) {
                     for range in &filter.ranges {
                         match range {
                             StringOrNumberRange::String(_) => {
-                                if column_type != &FeatureDataType::Text {
+                                if column_type != FeatureDataType::Text {
                                     return Err(error::Error::InvalidFeatureDataType);
                                 }
                             }
                             StringOrNumberRange::Float(_) => {
-                                if column_type != &FeatureDataType::Float {
+                                if column_type != FeatureDataType::Float {
                                     return Err(error::Error::InvalidFeatureDataType);
                                 }
                             }
                             StringOrNumberRange::Int(_) => {
-                                if column_type != &FeatureDataType::Int {
+                                if column_type != FeatureDataType::Int {
                                     return Err(error::Error::InvalidFeatureDataType);
                                 }
                             }
@@ -510,6 +514,8 @@ where
     }
 }
 
+type TimeExtractorType = Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync + 'static>;
+
 #[pin_project(project = OgrSourceStreamProjection)]
 pub struct OgrSourceStream<G>
 where
@@ -519,7 +525,7 @@ where
     dataset_iterator: Arc<Mutex<OgrDatasetIterator>>,
     data_types: Arc<HashMap<String, FeatureDataType>>,
     feature_collection_builder: FeatureCollectionBuilder<G>,
-    time_extractor: Arc<Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync + 'static>>,
+    time_extractor: Arc<TimeExtractorType>,
     time_attribute_parser:
         Arc<Box<dyn Fn(FieldValue) -> Result<TimeInstance> + Send + Sync + 'static>>,
     query_rectangle: VectorQueryRectangle,
@@ -539,7 +545,7 @@ impl FeaturesProvider<'_> {
     fn layer_ref(&self) -> &Layer {
         match self {
             FeaturesProvider::Layer(l) => l,
-            FeaturesProvider::ResultSet(r) => &**r,
+            FeaturesProvider::ResultSet(r) => r,
         }
     }
 
@@ -759,7 +765,7 @@ where
         feature_collection_builder: FeatureCollectionBuilder<G>,
         data_types: Arc<HashMap<String, FeatureDataType>>,
         query_rectangle: VectorQueryRectangle,
-        time_extractor: Arc<Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync>>,
+        time_extractor: Arc<TimeExtractorType>,
         time_attribute_parser: Arc<Box<dyn Fn(FieldValue) -> Result<TimeInstance> + Send + Sync>>,
         chunk_byte_size: usize,
     ) -> Result<FeatureCollection<G>> {
@@ -847,9 +853,7 @@ where
         }
     }
 
-    fn initialize_time_extractors(
-        time: OgrSourceDatasetTimeType,
-    ) -> Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync> {
+    fn initialize_time_extractors(time: OgrSourceDatasetTimeType) -> TimeExtractorType {
         // TODO: exploit rust-gdal `datetime` feature
 
         match time {
@@ -1187,8 +1191,8 @@ where
             return Ok(());
         }
 
-        builder.push_generic_geometry(geometry)?;
-        builder.push_time_interval(time_interval)?;
+        builder.push_generic_geometry(geometry);
+        builder.push_time_interval(time_interval);
 
         for (column, data_type) in data_types {
             let field = feature.field(&column);
@@ -1385,38 +1389,38 @@ pub trait FeatureCollectionBuilderGeometryHandler<G>
 where
     G: Geometry,
 {
-    fn push_generic_geometry(&mut self, geometry: G) -> Result<()>;
+    fn push_generic_geometry(&mut self, geometry: G);
 }
 
 impl FeatureCollectionBuilderGeometryHandler<MultiPoint>
     for FeatureCollectionRowBuilder<MultiPoint>
 {
-    fn push_generic_geometry(&mut self, geometry: MultiPoint) -> Result<()> {
-        self.push_geometry(geometry).map_err(Into::into)
+    fn push_generic_geometry(&mut self, geometry: MultiPoint) {
+        self.push_geometry(geometry);
     }
 }
 
 impl FeatureCollectionBuilderGeometryHandler<MultiLineString>
     for FeatureCollectionRowBuilder<MultiLineString>
 {
-    fn push_generic_geometry(&mut self, geometry: MultiLineString) -> Result<()> {
-        self.push_geometry(geometry).map_err(Into::into)
+    fn push_generic_geometry(&mut self, geometry: MultiLineString) {
+        self.push_geometry(geometry);
     }
 }
 
 impl FeatureCollectionBuilderGeometryHandler<MultiPolygon>
     for FeatureCollectionRowBuilder<MultiPolygon>
 {
-    fn push_generic_geometry(&mut self, geometry: MultiPolygon) -> Result<()> {
-        self.push_geometry(geometry).map_err(Into::into)
+    fn push_generic_geometry(&mut self, geometry: MultiPolygon) {
+        self.push_geometry(geometry);
     }
 }
 
 impl FeatureCollectionBuilderGeometryHandler<NoGeometry>
     for FeatureCollectionRowBuilder<NoGeometry>
 {
-    fn push_generic_geometry(&mut self, _geometry: NoGeometry) -> Result<()> {
-        Ok(()) // do nothing
+    fn push_generic_geometry(&mut self, _geometry: NoGeometry) {
+        // do nothing
     }
 }
 
@@ -1424,7 +1428,9 @@ impl FeatureCollectionBuilderGeometryHandler<NoGeometry>
 mod tests {
     use super::*;
 
-    use crate::engine::{ChunkByteSize, MockExecutionContext, MockQueryContext, StaticMetaData};
+    use crate::engine::{
+        ChunkByteSize, MockExecutionContext, MockQueryContext, StaticMetaData, VectorColumnInfo,
+    };
     use crate::source::ogr_source::FormatSpecifics::Csv;
     use crate::test_data;
     use futures::{StreamExt, TryStreamExt};
@@ -1432,9 +1438,9 @@ mod tests {
         DataCollection, FeatureCollectionInfos, GeometryCollection, MultiPointCollection,
         MultiPolygonCollection,
     };
-    use geoengine_datatypes::dataset::InternalDatasetId;
+    use geoengine_datatypes::dataset::{DataId, DatasetId};
     use geoengine_datatypes::primitives::{
-        BoundingBox2D, FeatureData, SpatialResolution, TimeGranularity,
+        BoundingBox2D, FeatureData, Measurement, SpatialResolution, TimeGranularity,
     };
     use geoengine_datatypes::spatial_reference::{SpatialReference, SpatialReferenceOption};
     use geoengine_datatypes::util::test::TestDefault;
@@ -1481,7 +1487,7 @@ mod tests {
             attribute_query: None,
         };
 
-        let serialized_spec = serde_json::to_string(&spec).unwrap();
+        let serialized_spec = serde_json::to_value(&spec).unwrap();
 
         assert_eq!(
             serialized_spec,
@@ -1528,7 +1534,6 @@ mod tests {
                 "sqlQuery": null,
                 "attributeQuery": null
             })
-            .to_string()
         );
 
         let deserialized_spec: OgrSourceDataset = serde_json::from_str(
@@ -1788,12 +1793,10 @@ mod tests {
 
     #[tokio::test]
     async fn ne_10m_ports_bbox_filter() -> Result<()> {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
@@ -1821,7 +1824,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -1886,12 +1889,10 @@ mod tests {
 
     #[tokio::test]
     async fn ne_10m_ports_force_spatial_filter() -> Result<()> {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
@@ -1919,7 +1920,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -1984,12 +1985,10 @@ mod tests {
 
     #[tokio::test]
     async fn ne_10m_ports_fast_spatial_filter() -> Result<()> {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!(
@@ -2020,7 +2019,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -2086,9 +2085,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn ne_10m_ports_columns() -> Result<()> {
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
             id.clone(),
@@ -2124,11 +2121,41 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: [
-                        ("natlscale".to_string(), FeatureDataType::Float),
-                        ("scalerank".to_string(), FeatureDataType::Int),
-                        ("featurecla".to_string(), FeatureDataType::Int),
-                        ("name".to_string(), FeatureDataType::Text),
-                        ("website".to_string(), FeatureDataType::Text),
+                        (
+                            "natlscale".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Float,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "scalerank".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "featurecla".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "name".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "website".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
                     ]
                     .iter()
                     .cloned()
@@ -2142,7 +2169,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset: id.clone(),
+                data: id.clone(),
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -2282,9 +2309,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn ne_10m_ports() -> Result<()> {
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
             id.clone(),
@@ -2315,7 +2340,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset: id.clone(),
+                data: id.clone(),
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -3453,6 +3478,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn plain_data() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -3486,9 +3512,27 @@ mod tests {
                 data_type: VectorDataType::Data,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -3550,6 +3594,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn default_geometry() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -3585,9 +3630,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -3651,9 +3714,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn chunked() -> Result<()> {
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
             id.clone(),
@@ -3684,7 +3745,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset: id.clone(),
+                data: id.clone(),
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -3901,12 +3962,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
@@ -3934,7 +3993,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -3980,12 +4039,10 @@ mod tests {
 
     #[tokio::test]
     async fn polygon_gpkg() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/germany_polygon.gpkg").into(),
@@ -4023,7 +4080,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4077,13 +4134,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/points.csv").into(),
@@ -4114,8 +4170,20 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: [
-                        ("num".to_string(), FeatureDataType::Int),
-                        ("txt".to_string(), FeatureDataType::Text),
+                        (
+                            "num".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "txt".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
                     ]
                     .iter()
                     .cloned()
@@ -4129,7 +4197,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4191,12 +4259,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn points_date_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date.csv").into(),
@@ -4235,10 +4301,16 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     time: None,
                     bbox: None,
                 },
@@ -4248,7 +4320,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4306,12 +4378,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn points_date_time_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date_time.csv").into(),
@@ -4352,10 +4422,16 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     time: None,
                     bbox: None,
                 },
@@ -4365,7 +4441,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4423,12 +4499,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn points_date_time_tz_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date_time_tz.csv").into(),
@@ -4469,10 +4543,16 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     time: None,
                     bbox: None,
                 },
@@ -4482,7 +4562,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4538,13 +4618,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_unix_date() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_unix_date.csv").into(),
@@ -4581,10 +4660,16 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     time: None,
                     bbox: None,
                 },
@@ -4594,7 +4679,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4652,12 +4737,10 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn vector_date_time_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date_time.csv").into(),
@@ -4699,8 +4782,20 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: [
-                        ("Name".to_string(), FeatureDataType::Text),
-                        ("DateTime".to_string(), FeatureDataType::DateTime),
+                        (
+                            "Name".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "DateTime".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
                     ]
                     .iter()
                     .cloned()
@@ -4714,7 +4809,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4776,13 +4871,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_bool_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/points_with_bool.csv").into(),
@@ -4812,10 +4906,16 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("bool".to_string(), FeatureDataType::Bool)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "bool".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Bool,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     time: None,
                     bbox: None,
                 },
@@ -4825,7 +4925,7 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
                 attribute_filters: None,
             },
@@ -4885,6 +4985,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn rename() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -4923,9 +5024,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -4987,6 +5106,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_string() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5020,9 +5140,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5084,6 +5222,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_int() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5117,9 +5256,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5179,6 +5336,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_float() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5212,9 +5370,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5274,6 +5450,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_int_renamed() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5311,9 +5488,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("d".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "d".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5373,6 +5568,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_int_multi_range() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5406,9 +5602,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("foo".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "foo".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5480,6 +5694,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_multi() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5513,9 +5728,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("foo".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "foo".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5584,6 +5817,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn attribute_filter_with_attribute_query() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -5617,9 +5851,27 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("foo".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "foo".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5712,8 +5964,20 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("natlscale".to_string(), FeatureDataType::Float),
-                    ("name".to_string(), FeatureDataType::Text),
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5789,8 +6053,20 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("natlscale".to_string(), FeatureDataType::Float),
-                    ("name".to_string(), FeatureDataType::Text),
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5869,8 +6145,20 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("natlscale".to_string(), FeatureDataType::Float),
-                    ("name".to_string(), FeatureDataType::Text),
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
@@ -5946,8 +6234,20 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("natlscale".to_string(), FeatureDataType::Float),
-                    ("name".to_string(), FeatureDataType::Text),
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()

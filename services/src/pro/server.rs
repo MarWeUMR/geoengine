@@ -49,6 +49,7 @@ where
             .configure(pro::handlers::users::init_user_routes::<C>)
             .configure(handlers::spatial_references::init_spatial_reference_routes::<C>)
             .configure(handlers::upload::init_upload_routes::<C>)
+            .configure(handlers::tasks::init_task_routes::<C>)
             .configure(handlers::wcs::init_wcs_routes::<C>)
             .configure(handlers::wfs::init_wfs_routes::<C>)
             .configure(handlers::wms::init_wms_routes::<C>)
@@ -61,8 +62,7 @@ where
 
         #[cfg(feature = "ebv")]
         {
-            app = app
-                .service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>(None)));
+            app = app.service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>()));
         }
 
         #[cfg(feature = "nfdi")]
@@ -112,6 +112,7 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
 
     let session_config: crate::util::config::Session = get_config_element()?;
     let user_config: crate::pro::util::config::User = get_config_element()?;
+    let oidc_config: crate::pro::util::config::Oidc = get_config_element()?;
 
     if session_config.anonymous_access {
         info!("Anonymous access is enabled");
@@ -127,6 +128,12 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
         info!("User registration is enabled");
     } else {
         info!("User registration is disabled");
+    }
+
+    if oidc_config.enabled {
+        info!("OIDC is enabled");
+    } else {
+        info!("OIDC is disabled");
     }
 
     let data_path_config: config::DataProvider = get_config_element()?;
@@ -147,6 +154,7 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
                 data_path_config.layer_collection_defs_path,
                 tiling_spec,
                 chunk_byte_size,
+                oidc_config,
             )
             .await;
 
@@ -182,6 +190,7 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
                     data_path_config.layer_collection_defs_path,
                     tiling_spec,
                     chunk_byte_size,
+                    oidc_config,
                 )
                 .await?;
 

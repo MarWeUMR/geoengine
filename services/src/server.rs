@@ -108,6 +108,7 @@ where
             .configure(handlers::session::init_session_routes::<C>)
             .configure(handlers::spatial_references::init_spatial_reference_routes::<C>)
             .configure(handlers::upload::init_upload_routes::<C>)
+            .configure(handlers::tasks::init_task_routes::<C>)
             .configure(handlers::wcs::init_wcs_routes::<C>)
             .configure(handlers::wfs::init_wfs_routes::<C>)
             .configure(handlers::wms::init_wms_routes::<C>)
@@ -115,8 +116,7 @@ where
 
         #[cfg(feature = "ebv")]
         {
-            app = app
-                .service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>(None)));
+            app = app.service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>()));
         }
 
         #[cfg(feature = "nfdi")]

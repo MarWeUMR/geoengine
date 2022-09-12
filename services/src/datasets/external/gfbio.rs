@@ -2,28 +2,32 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::datasets::listing::{Provenance, ProvenanceOutput};
-use crate::error::Error;
-use crate::{datasets::listing::DatasetListOptions, error::Result};
-use crate::{
-    datasets::{
-        listing::{DatasetListing, ExternalDatasetProvider},
-        storage::ExternalDatasetProviderDefinition,
-    },
-    util::user_input::Validated,
+use crate::error::Result;
+use crate::error::{self, Error};
+use crate::layers::external::{DataProvider, DataProviderDefinition};
+use crate::layers::layer::{
+    CollectionItem, Layer, LayerCollection, LayerCollectionListOptions, LayerListing,
+    ProviderLayerCollectionId, ProviderLayerId,
 };
+use crate::layers::listing::{LayerCollectionId, LayerCollectionProvider};
+use crate::util::user_input::Validated;
+use crate::workflows::workflow::Workflow;
 use async_trait::async_trait;
 use bb8_postgres::bb8::{Pool, PooledConnection};
 use bb8_postgres::tokio_postgres::{Config, NoTls};
 use bb8_postgres::PostgresConnectionManager;
 use geoengine_datatypes::collections::VectorDataType;
-use geoengine_datatypes::dataset::{DatasetId, DatasetProviderId, ExternalDatasetId};
+use geoengine_datatypes::dataset::{DataId, DataProviderId, ExternalDataId, LayerId};
 use geoengine_datatypes::primitives::{
-    FeatureDataType, RasterQueryRectangle, VectorQueryRectangle,
+    FeatureDataType, Measurement, RasterQueryRectangle, VectorQueryRectangle,
 };
 use geoengine_datatypes::spatial_reference::SpatialReference;
-use geoengine_operators::engine::{StaticMetaData, TypedResultDescriptor};
+use geoengine_operators::engine::{
+    StaticMetaData, TypedOperator, VectorColumnInfo, VectorOperator,
+};
 use geoengine_operators::source::{
-    OgrSourceColumnSpec, OgrSourceDatasetTimeType, OgrSourceErrorSpec,
+    OgrSource, OgrSourceColumnSpec, OgrSourceDatasetTimeType, OgrSourceErrorSpec,
+    OgrSourceParameters,
 };
 use geoengine_operators::{
     engine::{MetaData, MetaDataProvider, RasterResultDescriptor, VectorResultDescriptor},
@@ -31,9 +35,10 @@ use geoengine_operators::{
     source::{GdalLoadingInfo, OgrSourceDataset},
 };
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 
-pub const GFBIO_PROVIDER_ID: DatasetProviderId =
-    DatasetProviderId::from_u128(0x907f_9f5b_0304_4a0e_a5ef_28de_62d1_c0f9);
+pub const GFBIO_PROVIDER_ID: DataProviderId =
+    DataProviderId::from_u128(0x907f_9f5b_0304_4a0e_a5ef_28de_62d1_c0f9);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct DatabaseConnectionConfig {
@@ -73,20 +78,20 @@ pub struct GfbioDataProviderDefinition {
 
 #[typetag::serde]
 #[async_trait]
-impl ExternalDatasetProviderDefinition for GfbioDataProviderDefinition {
-    async fn initialize(self: Box<Self>) -> Result<Box<dyn ExternalDatasetProvider>> {
+impl DataProviderDefinition for GfbioDataProviderDefinition {
+    async fn initialize(self: Box<Self>) -> Result<Box<dyn DataProvider>> {
         Ok(Box::new(GfbioDataProvider::new(self.db_config).await?))
     }
 
-    fn type_name(&self) -> String {
-        "GFBio".to_owned()
+    fn type_name(&self) -> &'static str {
+        "GFBio"
     }
 
     fn name(&self) -> String {
         self.name.clone()
     }
 
-    fn id(&self) -> DatasetProviderId {
+    fn id(&self) -> DataProviderId {
         GFBIO_PROVIDER_ID
     }
 }
@@ -169,15 +174,31 @@ impl GfbioDataProvider {
 }
 
 #[async_trait]
-impl ExternalDatasetProvider for GfbioDataProvider {
-    async fn list(&self, _options: Validated<DatasetListOptions>) -> Result<Vec<DatasetListing>> {
+impl LayerCollectionProvider for GfbioDataProvider {
+    async fn collection(
+        &self,
+        collection: &LayerCollectionId,
+        options: Validated<LayerCollectionListOptions>,
+    ) -> Result<LayerCollection> {
+        ensure!(
+            *collection == self.root_collection_id().await?,
+            error::UnknownLayerCollectionId {
+                id: collection.clone()
+            }
+        );
+
         let conn = self.pool.get().await?;
+
+        let options = options.user_input;
 
         let stmt = conn
             .prepare(&format!(
                 r#"
-            SELECT surrogate_key, "{title}", "{details}"
-            FROM {schema}.abcd_datasets;"#,
+                SELECT surrogate_key, "{title}", "{details}"
+                FROM {schema}.abcd_datasets
+                ORDER BY surrogate_key
+                LIMIT $1
+                OFFSET $2;"#,
                 title = self
                     .column_name_to_hash
                     .get("/DataSets/DataSet/Metadata/Description/Representation/Title")
@@ -190,46 +211,109 @@ impl ExternalDatasetProvider for GfbioDataProvider {
             ))
             .await?;
 
-        let rows = conn.query(&stmt, &[]).await?;
+        let rows = conn
+            .query(
+                &stmt,
+                &[&i64::from(options.limit), &i64::from(options.offset)],
+            )
+            .await?;
 
-        let listings: Vec<_> = rows
+        let items: Vec<_> = rows
             .into_iter()
-            .map(|row| DatasetListing {
-                id: DatasetId::External(ExternalDatasetId {
-                    provider_id: GFBIO_PROVIDER_ID,
-                    dataset_id: row.get::<usize, i32>(0).to_string(),
-                }),
-                name: row.get(1),
-                description: row.try_get(2).unwrap_or_else(|_| "".to_owned()),
-                tags: vec![],
-                source_operator: "OgrSource".to_owned(),
-                result_descriptor: TypedResultDescriptor::Vector(VectorResultDescriptor {
-                    data_type: VectorDataType::MultiPoint,
-                    spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: self
-                        .column_hash_to_name
-                        .iter()
-                        .filter(|(_, name)| name.starts_with("/DataSets/DataSet/Units/Unit/"))
-                        .map(|(_, name)| (name.clone(), FeatureDataType::Text))
-                        .collect(),
-                    time: None, // TODO: determine time
-                    bbox: None, // TODO: determine bbox
-                }),
-                symbology: None,
+            .map(|row| {
+                CollectionItem::Layer(LayerListing {
+                    id: ProviderLayerId {
+                        provider_id: GFBIO_PROVIDER_ID,
+                        layer_id: LayerId(row.get::<usize, i32>(0).to_string()),
+                    },
+                    name: row.get(1),
+                    description: row.try_get(2).unwrap_or_else(|_| "".to_owned()),
+                })
             })
             .collect();
 
-        Ok(listings)
+        Ok(LayerCollection {
+            id: ProviderLayerCollectionId {
+                provider_id: GFBIO_PROVIDER_ID,
+                collection_id: collection.clone(),
+            },
+            name: "GFBio".to_owned(),
+            description: "GFBio".to_owned(),
+            items,
+            entry_label: None,
+            properties: vec![],
+        })
     }
 
-    async fn provenance(&self, dataset: &DatasetId) -> Result<ProvenanceOutput> {
-        let surrogate_key: i32 = dataset
+    async fn root_collection_id(&self) -> Result<LayerCollectionId> {
+        Ok(LayerCollectionId("abcd".to_owned()))
+    }
+
+    async fn get_layer(&self, id: &LayerId) -> Result<Layer> {
+        let surrogate_key: i32 = id.0.parse().map_err(|_| Error::InvalidDataId)?;
+
+        let conn = self.pool.get().await?;
+
+        let stmt = conn
+            .prepare(&format!(
+                r#"
+                SELECT "{title}", "{details}"
+                FROM {schema}.abcd_datasets
+                WHERE surrogate_key = $1;"#,
+                title = self
+                    .column_name_to_hash
+                    .get("/DataSets/DataSet/Metadata/Description/Representation/Title")
+                    .ok_or(Error::GfbioMissingAbcdField)?,
+                details = self
+                    .column_name_to_hash
+                    .get("/DataSets/DataSet/Metadata/Description/Representation/Details")
+                    .ok_or(Error::GfbioMissingAbcdField)?,
+                schema = self.db_config.schema
+            ))
+            .await?;
+
+        let row = conn.query_one(&stmt, &[&surrogate_key]).await?;
+
+        Ok(Layer {
+            id: ProviderLayerId {
+                provider_id: GFBIO_PROVIDER_ID,
+                layer_id: id.clone(),
+            },
+            name: row.get(0),
+            description: row.try_get(1).unwrap_or_else(|_| "".to_owned()),
+            workflow: Workflow {
+                operator: TypedOperator::Vector(
+                    OgrSource {
+                        params: OgrSourceParameters {
+                            data: DataId::External(ExternalDataId {
+                                provider_id: GFBIO_PROVIDER_ID,
+                                layer_id: id.clone(),
+                            }),
+                            attribute_projection: None,
+                            attribute_filters: None,
+                        },
+                    }
+                    .boxed(),
+                ),
+            },
+            symbology: None, // TODO
+            properties: vec![],
+            metadata: HashMap::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl DataProvider for GfbioDataProvider {
+    async fn provenance(&self, id: &DataId) -> Result<ProvenanceOutput> {
+        let surrogate_key: i32 = id
             .external()
-            .ok_or(Error::InvalidDatasetId)
+            .ok_or(Error::InvalidDataId)
             .map_err(|e| geoengine_operators::error::Error::LoadingInfo {
                 source: Box::new(e),
             })?
-            .dataset_id
+            .layer_id
+            .0
             .parse()
             .map_err(|e| geoengine_operators::error::Error::LoadingInfo {
                 source: Box::new(e),
@@ -261,17 +345,13 @@ impl ExternalDatasetProvider for GfbioDataProvider {
         let row = conn.query_one(&stmt, &[&surrogate_key]).await?;
 
         Ok(ProvenanceOutput {
-            dataset: dataset.clone(),
+            data: id.clone(),
             provenance: Some(Provenance {
                 citation: row.try_get(0).unwrap_or_else(|_| "".to_owned()),
                 license: row.try_get(1).unwrap_or_else(|_| "".to_owned()),
                 uri: row.try_get(2).unwrap_or_else(|_| "".to_owned()),
             }),
         })
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -281,18 +361,19 @@ impl MetaDataProvider<OgrSourceDataset, VectorResultDescriptor, VectorQueryRecta
 {
     async fn meta_data(
         &self,
-        dataset: &DatasetId,
+        id: &DataId,
     ) -> Result<
         Box<dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>>,
         geoengine_operators::error::Error,
     > {
-        let surrogate_key: i32 = dataset
+        let surrogate_key: i32 = id
             .external()
-            .ok_or(Error::InvalidDatasetId)
+            .ok_or(Error::InvalidDataId)
             .map_err(|e| geoengine_operators::error::Error::LoadingInfo {
                 source: Box::new(e),
             })?
-            .dataset_id
+            .layer_id
+            .0
             .parse()
             .map_err(|e| geoengine_operators::error::Error::LoadingInfo {
                 source: Box::new(e),
@@ -342,7 +423,15 @@ impl MetaDataProvider<OgrSourceDataset, VectorResultDescriptor, VectorQueryRecta
                     .column_hash_to_name
                     .iter()
                     .filter(|(_, name)| name.starts_with("/DataSets/DataSet/Units/Unit"))
-                    .map(|(_, name)| (name.clone(), FeatureDataType::Text))
+                    .map(|(_, name)| {
+                        (
+                            name.clone(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        )
+                    })
                     .collect(),
                 time: None,
                 bbox: None,
@@ -358,7 +447,7 @@ impl MetaDataProvider<GdalLoadingInfo, RasterResultDescriptor, RasterQueryRectan
 {
     async fn meta_data(
         &self,
-        _dataset: &DatasetId,
+        _id: &DataId,
     ) -> Result<
         Box<dyn MetaData<GdalLoadingInfo, RasterResultDescriptor, RasterQueryRectangle>>,
         geoengine_operators::error::Error,
@@ -374,7 +463,7 @@ impl
 {
     async fn meta_data(
         &self,
-        _dataset: &DatasetId,
+        _id: &DataId,
     ) -> Result<
         Box<
             dyn MetaData<
@@ -394,6 +483,7 @@ mod tests {
     use bb8_postgres::bb8::ManageConnection;
     use futures::StreamExt;
     use geoengine_datatypes::collections::MultiPointCollection;
+    use geoengine_datatypes::dataset::{ExternalDataId, LayerId};
     use geoengine_datatypes::primitives::{
         BoundingBox2D, FeatureData, MultiPoint, SpatialResolution, TimeInterval,
     };
@@ -402,11 +492,9 @@ mod tests {
     use geoengine_operators::{engine::MockQueryContext, source::OgrSourceProcessor};
     use rand::RngCore;
 
+    use crate::layers::layer::ProviderLayerCollectionId;
     use crate::test_data;
-    use crate::{
-        datasets::listing::OrderBy,
-        util::{config, user_input::UserInput},
-    };
+    use crate::util::{config, user_input::UserInput};
     use std::{fs::File, io::Read, path::PathBuf};
 
     use super::*;
@@ -466,7 +554,7 @@ mod tests {
         let test_schema = create_test_data(&db_config).await;
 
         let provider = Box::new(GfbioDataProviderDefinition {
-            name: "Gfbio".to_string(),
+            name: "GFBio".to_string(),
             db_config: DatabaseConnectionConfig {
                 host: db_config.host.clone(),
                 port: db_config.port,
@@ -480,11 +568,12 @@ mod tests {
         .await
         .unwrap();
 
-        let listing = provider
-            .list(
-                DatasetListOptions {
-                    filter: None,
-                    order: OrderBy::NameAsc,
+        let root_id = provider.root_collection_id().await.unwrap();
+
+        let collection = provider
+            .collection(
+                &root_id,
+                LayerCollectionListOptions {
                     offset: 0,
                     limit: 10,
                 }
@@ -495,53 +584,28 @@ mod tests {
 
         cleanup_test_data(&db_config, test_schema).await;
 
-        let listing = listing.unwrap();
+        let collection = collection.unwrap();
 
         assert_eq!(
-            listing,
-            vec![DatasetListing {
-                id: DatasetId::External(ExternalDatasetId {
+            collection,
+            LayerCollection {
+                id: ProviderLayerCollectionId {
                     provider_id: GFBIO_PROVIDER_ID,
-                    dataset_id: "1".to_string(),
-                }),
-                name: "Example Title".to_string(),
-                description: "".to_string(),
-                tags: vec![],
-                source_operator: "OgrSource".to_string(),
-                result_descriptor: TypedResultDescriptor::Vector(VectorResultDescriptor {
-                    data_type: VectorDataType::MultiPoint,
-                    spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [
-                        ("/DataSets/DataSet/Units/Unit/DateLastEdited".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Gathering/Agents/GatheringAgent/AgentText".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Gathering/Country/ISO3166Code".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Gathering/Country/Name".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Gathering/DateTime/ISODateTimeBegin".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Gathering/LocalityText".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Gathering/SiteCoordinateSets/SiteCoordinates/CoordinatesLatLong/SpatialDatum".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/HigherTaxa/HigherTaxon/HigherTaxonName".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/HigherTaxa/HigherTaxon/HigherTaxonRank".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/ScientificName/FullScientificNameString".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/Creator".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/FileURI".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/Format".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/Details".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/Text".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/URI".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/RecordBasis".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/RecordURI".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/SourceID".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/SourceInstitutionID".to_owned(), FeatureDataType::Text),
-                        ("/DataSets/DataSet/Units/Unit/UnitID".to_owned(), FeatureDataType::Text),
-                        ]
-                        .iter()
-                        .cloned()
-                        .collect(),
-                        time: None,
-                        bbox: None,
-                }),
-                symbology: None,
-            }]
+                    collection_id: root_id,
+                },
+                name: "GFBio".to_string(),
+                description: "GFBio".to_string(),
+                items: vec![CollectionItem::Layer(LayerListing {
+                    id: ProviderLayerId {
+                        provider_id: GFBIO_PROVIDER_ID,
+                        layer_id: LayerId("1".to_string()),
+                    },
+                    name: "Example Title".to_string(),
+                    description: "".to_string(),
+                })],
+                entry_label: None,
+                properties: vec![],
+            }
         );
     }
 
@@ -561,7 +625,7 @@ mod tests {
             let ogr_pg_string = provider_db_config.ogr_pg_config();
 
             let provider = Box::new(GfbioDataProviderDefinition {
-                name: "Gfbio".to_string(),
+                name: "GFBio".to_string(),
                 db_config: provider_db_config,
             })
             .initialize()
@@ -571,38 +635,43 @@ mod tests {
             let meta: Box<
                 dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>,
             > = provider
-                .meta_data(&DatasetId::External(ExternalDatasetId {
+                .meta_data(&DataId::External(ExternalDataId {
                     provider_id: GFBIO_PROVIDER_ID,
-                    dataset_id: "1".to_string(),
+                    layer_id: LayerId("1".to_string()),
                 }))
                 .await
                 .map_err(|e| e.to_string())?;
+
+            let text_column = VectorColumnInfo {
+                data_type: FeatureDataType::Text,
+                measurement: Measurement::Unitless,
+            };
 
             let expected = VectorResultDescriptor {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReference::epsg_4326().into(),
                 columns:  [
-                    ("/DataSets/DataSet/Units/Unit/DateLastEdited".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Gathering/Agents/GatheringAgent/AgentText".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Gathering/Country/ISO3166Code".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Gathering/Country/Name".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Gathering/DateTime/ISODateTimeBegin".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Gathering/LocalityText".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Gathering/SiteCoordinateSets/SiteCoordinates/CoordinatesLatLong/SpatialDatum".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/HigherTaxa/HigherTaxon/HigherTaxonName".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/HigherTaxa/HigherTaxon/HigherTaxonRank".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/ScientificName/FullScientificNameString".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/Creator".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/FileURI".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/Format".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/Details".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/Text".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/URI".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/RecordBasis".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/RecordURI".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/SourceID".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/SourceInstitutionID".to_owned(), FeatureDataType::Text),
-                    ("/DataSets/DataSet/Units/Unit/UnitID".to_owned(), FeatureDataType::Text),
+                    ("/DataSets/DataSet/Units/Unit/DateLastEdited".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Gathering/Agents/GatheringAgent/AgentText".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Gathering/Country/ISO3166Code".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Gathering/Country/Name".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Gathering/DateTime/ISODateTimeBegin".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Gathering/LocalityText".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Gathering/SiteCoordinateSets/SiteCoordinates/CoordinatesLatLong/SpatialDatum".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/HigherTaxa/HigherTaxon/HigherTaxonName".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/HigherTaxa/HigherTaxon/HigherTaxonRank".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/Identifications/Identification/Result/TaxonIdentified/ScientificName/FullScientificNameString".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/Creator".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/FileURI".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/Format".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/Details".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/Text".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/MultiMediaObjects/MultiMediaObject/IPR/Licenses/License/URI".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/RecordBasis".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/RecordURI".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/SourceID".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/SourceInstitutionID".to_owned(), text_column.clone()),
+                    ("/DataSets/DataSet/Units/Unit/UnitID".to_owned(), text_column.clone()),
                     ]
                     .iter()
                     .cloned()
@@ -726,7 +795,7 @@ mod tests {
     async fn it_loads() {
         async fn test(db_config: &config::Postgres, test_schema: &str) -> Result<(), String> {
             let provider = Box::new(GfbioDataProviderDefinition {
-                name: "Gfbio".to_string(),
+                name: "GFBio".to_string(),
                 db_config: DatabaseConnectionConfig {
                     host: db_config.host.clone(),
                     port: db_config.port,
@@ -743,9 +812,9 @@ mod tests {
             let meta: Box<
                 dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>,
             > = provider
-                .meta_data(&DatasetId::External(ExternalDatasetId {
+                .meta_data(&DataId::External(ExternalDataId {
                     provider_id: GFBIO_PROVIDER_ID,
-                    dataset_id: "1".to_string(),
+                    layer_id: LayerId("1".to_string()),
                 }))
                 .await
                 .map_err(|e| e.to_string())?;
@@ -829,7 +898,7 @@ mod tests {
     async fn it_cites() {
         async fn test(db_config: &config::Postgres, test_schema: &str) -> Result<(), String> {
             let provider = Box::new(GfbioDataProviderDefinition {
-                name: "Gfbio".to_string(),
+                name: "GFBio".to_string(),
                 db_config: DatabaseConnectionConfig {
                     host: db_config.host.clone(),
                     port: db_config.port,
@@ -843,9 +912,9 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
 
-            let dataset = DatasetId::External(ExternalDatasetId {
+            let dataset = DataId::External(ExternalDataId {
                 provider_id: GFBIO_PROVIDER_ID,
-                dataset_id: "1".to_owned(),
+                layer_id: LayerId("1".to_owned()),
             });
 
             let result = provider
@@ -854,9 +923,9 @@ mod tests {
                 .map_err(|e| e.to_string())?;
 
             let expected = ProvenanceOutput {
-                dataset: DatasetId::External(ExternalDatasetId {
+                data: DataId::External(ExternalDataId {
                     provider_id: GFBIO_PROVIDER_ID,
-                    dataset_id: "1".to_owned(),
+                    layer_id: LayerId("1".to_owned()),
                 }),
                 provenance: Some(Provenance {
                     citation: "Example Description".to_owned(),

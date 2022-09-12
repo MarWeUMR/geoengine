@@ -2,7 +2,6 @@ use geoengine_datatypes::primitives::{
     AxisAlignedRectangle, BoundingBox2D, FeatureDataType, Measurement, SpatialPartition2D,
     TimeInterval,
 };
-use geoengine_datatypes::raster::FromPrimitive;
 use geoengine_datatypes::{
     collections::VectorDataType, raster::RasterDataType, spatial_reference::SpatialReferenceOption,
 };
@@ -55,7 +54,6 @@ pub struct RasterResultDescriptor {
     pub data_type: RasterDataType,
     pub spatial_reference: SpatialReferenceOption,
     pub measurement: Measurement,
-    pub no_data_value: Option<f64>,
     pub time: Option<TimeInterval>,
     pub bbox: Option<SpatialPartition2D>,
 }
@@ -105,11 +103,7 @@ impl ResultDescriptor for RasterResultDescriptor {
     }
 }
 
-impl RasterResultDescriptor {
-    pub fn no_data_value_as_<T: FromPrimitive<f64>>(&self) -> Option<T> {
-        self.no_data_value.map(|v| T::from_(v))
-    }
-}
+impl RasterResultDescriptor {}
 
 /// A `ResultDescriptor` for vector queries
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,9 +111,16 @@ impl RasterResultDescriptor {
 pub struct VectorResultDescriptor {
     pub data_type: VectorDataType,
     pub spatial_reference: SpatialReferenceOption,
-    pub columns: HashMap<String, FeatureDataType>,
+    pub columns: HashMap<String, VectorColumnInfo>,
     pub time: Option<TimeInterval>,
     pub bbox: Option<BoundingBox2D>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorColumnInfo {
+    pub data_type: FeatureDataType,
+    pub measurement: Measurement,
 }
 
 impl VectorResultDescriptor {
@@ -127,7 +128,7 @@ impl VectorResultDescriptor {
     #[must_use]
     pub fn map_columns<F>(&self, f: F) -> Self
     where
-        F: Fn(&HashMap<String, FeatureDataType>) -> HashMap<String, FeatureDataType>,
+        F: Fn(&HashMap<String, VectorColumnInfo>) -> HashMap<String, VectorColumnInfo>,
     {
         Self {
             data_type: self.data_type,
@@ -135,6 +136,14 @@ impl VectorResultDescriptor {
             columns: f(&self.columns),
             ..*self
         }
+    }
+
+    pub fn column_data_type(&self, column: &str) -> Option<FeatureDataType> {
+        self.columns.get(column).map(|c| c.data_type)
+    }
+
+    pub fn column_measurement(&self, column: &str) -> Option<&Measurement> {
+        self.columns.get(column).map(|c| &c.measurement)
     }
 }
 
@@ -298,7 +307,13 @@ mod tests {
 
         let columns = {
             let mut columns = HashMap::with_capacity(1);
-            columns.insert("foo".to_string(), FeatureDataType::Float);
+            columns.insert(
+                "foo".to_string(),
+                VectorColumnInfo {
+                    data_type: FeatureDataType::Float,
+                    measurement: Measurement::continuous("bar".into(), None),
+                },
+            );
             columns
         };
 

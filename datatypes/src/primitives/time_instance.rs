@@ -49,6 +49,15 @@ impl TimeInstance {
             .to_rfc3339()
     }
 
+    pub fn as_rfc3339_with_millis(self) -> String {
+        let instance = self.clamp(TimeInstance::MIN, TimeInstance::MAX);
+
+        instance
+            .as_date_time()
+            .expect("TimeInstance is not valid")
+            .to_rfc3339_with_millis()
+    }
+
     pub const fn inner(self) -> i64 {
         self.0
     }
@@ -61,6 +70,18 @@ impl TimeInstance {
     /// If this would overflow the range of `DateTime`, the result is `None`.
     pub fn as_date_time(self) -> Option<DateTime> {
         DateTime::try_from(self).ok()
+    }
+
+    /// Returns true if this instance equals `Self::MIN`, i.e., represents the start of time.
+    #[inline]
+    pub fn is_min(self) -> bool {
+        self == Self::MIN
+    }
+
+    /// Returns true if this instance equals `Self::MAX`, i.e., represents the end of time.
+    #[inline]
+    pub fn is_max(self) -> bool {
+        self == Self::MAX
     }
 
     pub const MIN: Self = TimeInstance::from_millis_unchecked(-8_334_632_851_200_001 + 1);
@@ -133,6 +154,10 @@ impl Add<i64> for TimeInstance {
     type Output = Self;
 
     fn add(self, rhs: i64) -> Self::Output {
+        if self.is_min() || self.is_max() {
+            // begin and end of time are special values, we don't want to do arithmetics on them
+            return self;
+        }
         TimeInstance::from_millis_unchecked(self.0 + rhs)
     }
 }
@@ -141,6 +166,10 @@ impl Sub<i64> for TimeInstance {
     type Output = Self;
 
     fn sub(self, rhs: i64) -> Self::Output {
+        if self.is_min() || self.is_max() {
+            // begin and end of time are special values, we don't want to do arithmetics on them
+            return self;
+        }
         TimeInstance::from_millis_unchecked(self.0 - rhs)
     }
 }
@@ -210,5 +239,13 @@ mod tests {
     fn bounds_wrt_chrono() {
         assert_eq!(TimeInstance::MIN, TimeInstance::from(DateTime::MIN));
         assert_eq!(TimeInstance::MAX, TimeInstance::from(DateTime::MAX));
+    }
+
+    #[test]
+    fn time_limits() {
+        assert_eq!(TimeInstance::MIN + 1, TimeInstance::MIN);
+        assert_eq!(TimeInstance::MIN - 1, TimeInstance::MIN);
+        assert_eq!(TimeInstance::MAX + 1, TimeInstance::MAX);
+        assert_eq!(TimeInstance::MAX - 1, TimeInstance::MAX);
     }
 }
