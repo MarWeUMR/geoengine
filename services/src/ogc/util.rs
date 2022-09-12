@@ -1,15 +1,16 @@
-use chrono::FixedOffset;
-use geoengine_datatypes::primitives::{AxisAlignedRectangle, BoundingBox2D};
+use geoengine_datatypes::primitives::{AxisAlignedRectangle, BoundingBox2D, DateTime};
 use geoengine_datatypes::primitives::{Coordinate2D, SpatialResolution, TimeInterval};
 use geoengine_datatypes::spatial_reference::SpatialReference;
+use reqwest::Url;
 use serde::de::Error;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use std::str::FromStr;
 
 use super::wcs::request::WcsBoundingbox;
 use crate::error::{self, Result};
 use crate::handlers::spatial_references::{spatial_reference_specification, AxisOrder};
+use crate::workflows::workflow::WorkflowId;
 
 #[derive(PartialEq, Debug, Deserialize, Serialize, Clone, Copy)]
 pub struct OgcBoundingBox {
@@ -102,17 +103,11 @@ fn parse_time_from_str<'de, D>(s: &str) -> Result<TimeInterval, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let split: Vec<_> = s
-        .split('/')
-        // use `from_str` instead of `parse_from_rfc3339` to use a relaxed form of RFC3339 that supports dates BC
-        .map(chrono::DateTime::<FixedOffset>::from_str)
-        .collect();
+    let split: Vec<_> = s.split('/').map(DateTime::from_str).collect();
 
     match *split.as_slice() {
-        [Ok(time)] => TimeInterval::new(time.timestamp_millis(), time.timestamp_millis())
-            .map_err(D::Error::custom),
-        [Ok(start), Ok(end)] => TimeInterval::new(start.timestamp_millis(), end.timestamp_millis())
-            .map_err(D::Error::custom),
+        [Ok(time)] => TimeInterval::new(time, time).map_err(D::Error::custom),
+        [Ok(start), Ok(end)] => TimeInterval::new(start, end).map_err(D::Error::custom),
         _ => Err(D::Error::custom(format!("Invalid time {}", s))),
     }
 }
@@ -260,9 +255,33 @@ pub fn tuple_from_ogc_params(
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum OgcProtocol {
+    Wcs,
+    Wms,
+    Wfs,
+}
+
+impl OgcProtocol {
+    fn url_path(self) -> &'static str {
+        match self {
+            OgcProtocol::Wcs => "wcs/",
+            OgcProtocol::Wms => "wms/",
+            OgcProtocol::Wfs => "wfs/",
+        }
+    }
+}
+
+pub fn ogc_endpoint_url(base: &Url, protocol: OgcProtocol, workflow: WorkflowId) -> Result<Url> {
+    ensure!(base.path().ends_with('/'), error::BaseUrlMustEndWithSlash);
+
+    base.join(protocol.url_path())?
+        .join(&workflow.to_string())
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
     use geoengine_datatypes::spatial_reference::SpatialReferenceAuthority;
     use serde::de::value::StringDeserializer;
     use serde::de::IntoDeserializer;
@@ -272,19 +291,20 @@ mod tests {
     #[test]
     fn parse_time_normal() {
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(1970, 1, 2).and_hms_milli(9, 10, 11, 12)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(1970, 1, 2, 9, 10, 11, 12))
+                .unwrap(),
             parse_time(to_deserializer("1970-01-02T09:10:11.012+00:00")).unwrap()
         );
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(2020, 12, 31).and_hms_milli(23, 59, 59, 999))
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(2020, 12, 31, 23, 59, 59, 999))
                 .unwrap(),
             parse_time(to_deserializer("2020-12-31T23:59:59.999Z")).unwrap()
         );
 
         assert_eq!(
             TimeInterval::new(
-                Utc.ymd(2019, 1, 1).and_hms_milli(0, 0, 0, 0),
-                Utc.ymd(2019, 12, 31).and_hms_milli(23, 59, 59, 999)
+                DateTime::new_utc_with_millis(2019, 1, 1, 0, 0, 0, 0),
+                DateTime::new_utc_with_millis(2019, 12, 31, 23, 59, 59, 999)
             )
             .unwrap(),
             parse_time(to_deserializer(
@@ -294,7 +314,8 @@ mod tests {
         );
 
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(2019, 1, 1).and_hms_milli(0, 0, 0, 0)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(2019, 1, 1, 0, 0, 0, 0))
+                .unwrap(),
             parse_time(to_deserializer(
                 "2019-01-01T00:00:00.000Z/2019-01-01T00:00:00.000Z"
             ))
@@ -302,7 +323,8 @@ mod tests {
         );
 
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(2014, 4, 1).and_hms_milli(12, 0, 0, 0)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(2014, 4, 1, 12, 0, 0, 0))
+                .unwrap(),
             parse_time(to_deserializer("2014-04-01T12:00:00.000+00:00")).unwrap()
         );
     }
@@ -310,11 +332,13 @@ mod tests {
     #[test]
     fn parse_time_medieval() {
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(600, 1, 2).and_hms_milli(9, 10, 11, 12)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(600, 1, 2, 9, 10, 11, 12))
+                .unwrap(),
             parse_time(to_deserializer("600-01-02T09:10:11.012+00:00")).unwrap()
         );
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(600, 1, 2).and_hms_milli(9, 10, 11, 12)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(600, 1, 2, 9, 10, 11, 12))
+                .unwrap(),
             parse_time(to_deserializer("600-01-02T09:10:11.012Z")).unwrap()
         );
     }
@@ -322,19 +346,23 @@ mod tests {
     #[test]
     fn parse_time_bc() {
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(-600, 1, 2).and_hms_milli(9, 10, 11, 12)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(-600, 1, 2, 9, 10, 11, 12))
+                .unwrap(),
             parse_time(to_deserializer("-600-01-02T09:10:11.012+00:00")).unwrap()
         );
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(-600, 1, 2).and_hms_milli(9, 10, 11, 12)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(-600, 1, 2, 9, 10, 11, 12))
+                .unwrap(),
             parse_time(to_deserializer("-0600-01-02T09:10:11.012+00:00")).unwrap()
         );
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(-600, 1, 2).and_hms_milli(9, 10, 11, 12)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(-600, 1, 2, 9, 10, 11, 12))
+                .unwrap(),
             parse_time(to_deserializer("-00600-01-02T09:10:11.012+00:00")).unwrap()
         );
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(-600, 1, 2).and_hms_milli(9, 10, 11, 0)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(-600, 1, 2, 9, 10, 11, 0))
+                .unwrap(),
             parse_time(to_deserializer("-00600-01-02T09:10:11.0Z")).unwrap()
         );
     }
@@ -342,7 +370,8 @@ mod tests {
     #[test]
     fn parse_time_with_offset() {
         assert_eq!(
-            TimeInterval::new_instant(Utc.ymd(-600, 1, 2).and_hms_milli(8, 10, 11, 0)).unwrap(),
+            TimeInterval::new_instant(DateTime::new_utc_with_millis(-600, 1, 2, 8, 10, 11, 0))
+                .unwrap(),
             parse_time(to_deserializer("-00600-01-02T09:10:11.0+01:00")).unwrap()
         );
     }
@@ -409,6 +438,40 @@ mod tests {
         assert_eq!(
             parse_coordinate(to_deserializer(s)).unwrap(),
             Coordinate2D::new(1.1, 2.2)
+        );
+    }
+
+    #[test]
+    fn it_builds_correct_endpoint_urls() {
+        assert_eq!(
+            ogc_endpoint_url(
+                &Url::parse("http://example.com/").unwrap(),
+                OgcProtocol::Wms,
+                WorkflowId::from_str("b9a7b1a0-efd6-4de9-9973-c3aeaf9282bd").unwrap(),
+            )
+            .unwrap(),
+            Url::parse("http://example.com/wms/b9a7b1a0-efd6-4de9-9973-c3aeaf9282bd").unwrap()
+        );
+
+        assert_eq!(
+            ogc_endpoint_url(
+                &Url::parse("http://example.com/a/").unwrap(),
+                OgcProtocol::Wms,
+                WorkflowId::from_str("b9a7b1a0-efd6-4de9-9973-c3aeaf9282bd").unwrap(),
+            )
+            .unwrap(),
+            Url::parse("http://example.com/a/wms/b9a7b1a0-efd6-4de9-9973-c3aeaf9282bd").unwrap()
+        );
+
+        assert_eq!(
+            ogc_endpoint_url(
+                &Url::parse("http://example.com/a/sub/folder/").unwrap(),
+                OgcProtocol::Wms,
+                WorkflowId::from_str("b9a7b1a0-efd6-4de9-9973-c3aeaf9282bd").unwrap(),
+            )
+            .unwrap(),
+            Url::parse("http://example.com/a/sub/folder/wms/b9a7b1a0-efd6-4de9-9973-c3aeaf9282bd")
+                .unwrap()
         );
     }
 }

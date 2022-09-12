@@ -71,6 +71,7 @@ async fn upload_handler<C: Context>(
             file.write_all(&bytes).await.context(error::Io)?;
             byte_size += bytes.len() as u64;
         }
+        file.flush().await.context(error::Io)?;
 
         files.push(FileUpload {
             id: file_id,
@@ -79,8 +80,7 @@ async fn upload_handler<C: Context>(
         });
     }
 
-    ctx.dataset_db_ref_mut()
-        .await
+    ctx.dataset_db_ref()
         .create_upload(
             &session,
             Upload {

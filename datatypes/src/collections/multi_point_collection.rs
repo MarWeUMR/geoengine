@@ -132,22 +132,20 @@ impl<'l> GeometryRandomAccess<'l> for MultiPointCollection {
 }
 
 impl GeoFeatureCollectionRowBuilder<MultiPoint> for FeatureCollectionRowBuilder<MultiPoint> {
-    fn push_geometry(&mut self, geometry: MultiPoint) -> Result<()> {
+    fn push_geometry(&mut self, geometry: MultiPoint) {
         let coordinate_builder = self.geometries_builder.values();
 
         for _ in geometry.as_ref() {
-            coordinate_builder.append(true)?;
+            coordinate_builder.append(true);
         }
 
         let float_builder = coordinate_builder.values();
         for coordinate in geometry.as_ref() {
-            float_builder.append_value(coordinate.x)?;
-            float_builder.append_value(coordinate.y)?;
+            float_builder.append_value(coordinate.x);
+            float_builder.append_value(coordinate.y);
         }
 
-        self.geometries_builder.append(true)?;
-
-        Ok(())
+        self.geometries_builder.append(true);
     }
 }
 
@@ -226,7 +224,7 @@ mod tests {
     use crate::operations::reproject::Reproject;
     use crate::primitives::{
         DataRef, FeatureData, FeatureDataRef, FeatureDataType, FeatureDataValue, MultiPointAccess,
-        TimeInterval,
+        TimeInstance, TimeInterval,
     };
     use float_cmp::approx_eq;
     use serde_json::{from_str, json};
@@ -317,23 +315,15 @@ mod tests {
             .unwrap();
         let mut builder = builder.finish_header();
 
-        builder
-            .push_geometry(Coordinate2D::new(0., 0.).into())
-            .unwrap();
-        builder
-            .push_time_interval(TimeInterval::new_unchecked(0, 1))
-            .unwrap();
+        builder.push_geometry(Coordinate2D::new(0., 0.).into());
+        builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
         builder
             .push_data("foo", FeatureDataValue::Float(0.))
             .unwrap();
         builder.finish_row();
 
-        builder
-            .push_geometry(Coordinate2D::new(1., 1.).into())
-            .unwrap();
-        builder
-            .push_time_interval(TimeInterval::new_unchecked(0, 1))
-            .unwrap();
+        builder.push_geometry(Coordinate2D::new(1., 1.).into());
+        builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
         builder
             .push_data("foo", FeatureDataValue::Float(1.))
             .unwrap();
@@ -369,23 +359,15 @@ mod tests {
                 .unwrap();
             let mut builder = builder.finish_header();
 
-            builder
-                .push_geometry(Coordinate2D::new(0., 0.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(0., 0.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("foo", FeatureDataValue::Float(0.))
                 .unwrap();
             builder.finish_row();
 
-            builder
-                .push_geometry(Coordinate2D::new(1., 1.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(1., 1.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("foo", FeatureDataValue::Float(1.))
                 .unwrap();
@@ -521,12 +503,8 @@ mod tests {
                 .unwrap();
             let mut builder = builder.finish_header();
 
-            builder
-                .push_geometry(Coordinate2D::new(0., 0.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(0., 0.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("foo", FeatureDataValue::Float(0.))
                 .unwrap();
@@ -538,12 +516,8 @@ mod tests {
                 .unwrap();
             builder.finish_row();
 
-            builder
-                .push_geometry(MultiPoint::new(vec![(1., 1.).into(), (2., 2.).into()]).unwrap())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(1, 2))
-                .unwrap();
+            builder.push_geometry(MultiPoint::new(vec![(1., 1.).into(), (2., 2.).into()]).unwrap());
+            builder.push_time_interval(TimeInterval::new_unchecked(1, 2));
             builder
                 .push_data("foo", FeatureDataValue::Float(1.))
                 .unwrap();
@@ -552,12 +526,8 @@ mod tests {
                 .unwrap();
             builder.finish_row();
 
-            builder
-                .push_geometry(Coordinate2D::new(3., 3.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(3, 4))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(3., 3.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(3, 4));
             builder
                 .push_data("foo", FeatureDataValue::Float(2.))
                 .unwrap();
@@ -691,22 +661,14 @@ mod tests {
 
             assert!(builder.is_empty());
 
-            builder
-                .push_geometry(Coordinate2D::new(0., 0.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(0., 0.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("number", FeatureDataValue::Float(0.))
                 .unwrap();
             builder.finish_row();
-            builder
-                .push_geometry(Coordinate2D::new(1., 1.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(1., 1.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("number", FeatureDataValue::Float(1.))
                 .unwrap();
@@ -722,7 +684,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::eq_op)]
     fn nan_equals() {
         let collection = {
             let mut builder = MultiPointCollection::builder();
@@ -733,12 +694,8 @@ mod tests {
 
             assert!(builder.is_empty());
 
-            builder
-                .push_geometry(Coordinate2D::new(0., 0.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(0., 0.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("number", FeatureDataValue::Float(f64::NAN))
                 .unwrap();
@@ -753,7 +710,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::eq_op)]
     fn null_equals() {
         let collection = {
             let mut builder = MultiPointCollection::builder();
@@ -762,12 +718,8 @@ mod tests {
                 .unwrap();
             let mut builder = builder.finish_header();
 
-            builder
-                .push_geometry(Coordinate2D::new(0., 0.).into())
-                .unwrap();
-            builder
-                .push_time_interval(TimeInterval::new_unchecked(0, 1))
-                .unwrap();
+            builder.push_geometry(Coordinate2D::new(0., 0.).into());
+            builder.push_time_interval(TimeInterval::new_unchecked(0, 1));
             builder
                 .push_data("number", FeatureDataValue::NullableFloat(None))
                 .unwrap();
@@ -907,6 +859,80 @@ mod tests {
                 .unwrap(),
             collection
                 .filter(vec![true, true, false, false, false])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn range_filter_bool() {
+        let collection = MultiPointCollection::from_data(
+            MultiPoint::many(vec![
+                (0.0, 0.1),
+                (1.0, 1.1),
+                (2.0, 3.1),
+                (3.0, 3.1),
+                (4.0, 4.1),
+            ])
+            .unwrap(),
+            vec![TimeInterval::new_unchecked(0, 1); 5],
+            [(
+                "foo".to_string(),
+                FeatureData::Bool(vec![false, false, true, true, true]),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            collection
+                .column_range_filter("foo", &[FeatureDataValue::Bool(true)..], false)
+                .unwrap(),
+            collection
+                .filter(vec![false, false, true, true, true])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn range_filter_datetime() {
+        let collection = MultiPointCollection::from_data(
+            MultiPoint::many(vec![
+                (0.0, 0.1),
+                (1.0, 1.1),
+                (2.0, 3.1),
+                (3.0, 3.1),
+                (4.0, 4.1),
+            ])
+            .unwrap(),
+            vec![TimeInterval::new_unchecked(0, 1); 5],
+            [(
+                "foo".to_string(),
+                FeatureData::DateTime(vec![
+                    TimeInstance::from_millis_unchecked(0),
+                    TimeInstance::from_millis_unchecked(10),
+                    TimeInstance::from_millis_unchecked(20),
+                    TimeInstance::from_millis_unchecked(30),
+                    TimeInstance::from_millis_unchecked(40),
+                ]),
+            )]
+            .iter()
+            .cloned()
+            .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            collection
+                .column_range_filter(
+                    "foo",
+                    &[FeatureDataValue::DateTime(TimeInstance::from_millis_unchecked(15))..],
+                    false
+                )
+                .unwrap(),
+            collection
+                .filter(vec![false, false, true, true, true])
                 .unwrap()
         );
     }
@@ -1242,7 +1268,7 @@ mod tests {
         assert_eq!(TimeInterval::new_unchecked(0, 1), row.time_interval);
         assert_eq!(Some(FeatureDataValue::NullableInt(Some(0))), row.get("foo"));
         assert_eq!(
-            Some(FeatureDataValue::NullableText(Some("a".to_string()))),
+            Some(FeatureDataValue::Text("a".to_string())),
             row.get("bar")
         );
 
@@ -1252,7 +1278,7 @@ mod tests {
 
         assert_eq!(Some(FeatureDataValue::NullableInt(None)), row.get("foo"));
         assert_eq!(
-            Some(FeatureDataValue::NullableText(Some("b".to_string()))),
+            Some(FeatureDataValue::Text("b".to_string())),
             row.get("bar")
         );
 
@@ -1261,7 +1287,7 @@ mod tests {
         assert_eq!(TimeInterval::new_unchecked(0, 1), row.time_interval);
         assert_eq!(Some(FeatureDataValue::NullableInt(Some(2))), row.get("foo"));
         assert_eq!(
-            Some(FeatureDataValue::NullableText(Some("c".to_string()))),
+            Some(FeatureDataValue::Text("c".to_string())),
             row.get("bar")
         );
 

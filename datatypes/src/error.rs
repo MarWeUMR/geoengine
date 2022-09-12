@@ -1,15 +1,58 @@
-use snafu::prelude::*;
-use std::convert::Infallible;
-
 use crate::{
     collections::FeatureCollectionError,
-    primitives::{BoundingBox2D, TimeInstance},
+    primitives::{BoundingBox2D, Coordinate2D, PrimitivesError, TimeInstance, TimeInterval},
+    raster::RasterDataType,
     spatial_reference::SpatialReference,
 };
-use crate::{
-    primitives::{Coordinate2D, PrimitivesError, TimeInterval},
-    raster::RasterDataType,
-};
+use snafu::{prelude::*, AsErrorSource, ErrorCompat, IntoError};
+use std::{any::Any, convert::Infallible, sync::Arc};
+
+pub trait ErrorSource: std::error::Error + Send + Sync + Any + 'static + AsErrorSource {
+    fn boxed(self) -> Box<dyn ErrorSource>
+    where
+        Self: Sized + 'static,
+    {
+        Box::new(self)
+    }
+
+    fn into_any_arc(self: Arc<Self>) -> Arc<(dyn Any + Send + Sync)>;
+}
+
+impl ErrorSource for dyn std::error::Error + Send + Sync + 'static {
+    fn into_any_arc(self: Arc<Self>) -> Arc<(dyn Any + Send + Sync)> {
+        Arc::new(self)
+    }
+}
+
+impl<T> ErrorSource for T
+where
+    T: std::error::Error + Send + Sync + 'static,
+{
+    fn into_any_arc(self: Arc<Self>) -> Arc<(dyn Any + Send + Sync)> {
+        self
+    }
+}
+
+pub trait BoxedResultExt<T, E>: Sized {
+    fn boxed_context<C, E2>(self, context: C) -> Result<T, E2>
+    where
+        C: IntoError<E2, Source = Box<dyn ErrorSource>>,
+        E2: std::error::Error + ErrorCompat;
+}
+
+impl<T, E> BoxedResultExt<T, E> for Result<T, E>
+where
+    E: ErrorSource,
+{
+    fn boxed_context<C, E2>(self, context: C) -> Result<T, E2>
+    where
+        C: IntoError<E2, Source = Box<dyn ErrorSource>>,
+        E2: std::error::Error + ErrorCompat,
+    {
+        self.map_err(|e| Box::new(e) as Box<dyn ErrorSource>)
+            .context(context)
+    }
+}
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
@@ -82,6 +125,12 @@ pub enum Error {
         index: Vec<isize>,
         min_index: Vec<isize>,
         max_index: Vec<isize>,
+    },
+
+    #[snafu(display("{:?} is not a valid index in the bounds 0, {:?} ", index, max_index,))]
+    LinearIndexOutOfBounds {
+        index: usize,
+        max_index: usize,
     },
 
     #[snafu(display("Invalid GridIndex ({:?}), reason: \"{}\".", grid_index, description))]
@@ -211,6 +260,8 @@ pub enum Error {
         source: gdal::errors::GdalError,
     },
 
+    GdalRasterDataTypeNotSupported,
+
     NoMatchingVectorDataTypeForOgrGeometryType,
 
     NoMatchingFeatureDataTypeForOgrFieldType,
@@ -245,6 +296,17 @@ pub enum Error {
     #[snafu(display("MissingRasterProperty Error: {}", property))]
     MissingRasterProperty {
         property: String,
+    },
+
+    TimeStepIterStartMustNotBeBeginOfTime,
+
+    MinMustBeSmallerThanMax {
+        min: f64,
+        max: f64,
+    },
+
+    ColorizerRescaleNotSupported {
+        colorizer: String,
     },
 }
 

@@ -1,12 +1,13 @@
-use crate::workflows::workflow::WorkflowId;
-use crate::{datasets::external::netcdfcf::NetCdfCf4DProviderError, handlers::ErrorResponse};
+#[cfg(feature = "ebv")]
+use crate::datasets::external::netcdfcf::NetCdfCf4DProviderError;
+use crate::handlers::ErrorResponse;
+use crate::{layers::listing::LayerCollectionId, workflows::workflow::WorkflowId};
 use actix_web::http::StatusCode;
 use actix_web::HttpResponse;
-use geoengine_datatypes::{
-    dataset::{DatasetId, DatasetProviderId},
-    spatial_reference::SpatialReferenceOption,
-};
-use snafu::{prelude::*, AsErrorSource};
+use geoengine_datatypes::dataset::{DatasetId, LayerId};
+use geoengine_datatypes::{dataset::DataProviderId, spatial_reference::SpatialReferenceOption};
+use snafu::prelude::*;
+use std::path::PathBuf;
 use strum::IntoStaticStr;
 use tonic::Status;
 
@@ -77,6 +78,8 @@ pub enum Error {
     LogoutFailed,
     #[snafu(display("The session id is invalid."))]
     InvalidSession,
+    #[snafu(display("Invalid admin token"))]
+    InvalidAdminToken,
     #[snafu(display("Header with authorization token not provided."))]
     MissingAuthorizationHeader,
     #[snafu(display("Authentication scheme must be Bearer."))]
@@ -120,7 +123,9 @@ pub enum Error {
     TokioPostgresTimeout,
 
     #[snafu(display("Identifier does not have the right format."))]
-    InvalidUuid,
+    InvalidUuid {
+        source: geoengine_datatypes::error::Error,
+    },
     SessionNotInitialized,
 
     ConfigLockFailed,
@@ -139,10 +144,12 @@ pub enum Error {
 
     MissingSettingsDirectory,
 
-    DatasetIdTypeMissMatch,
-    UnknownDatasetId,
+    DataIdTypeMissMatch,
+    UnknownDataId,
     UnknownProviderId,
     MissingDatasetId,
+
+    UnknownDatasetId,
 
     #[snafu(display("Permission denied for dataset with id {:?}", dataset))]
     DatasetPermissionDenied {
@@ -210,8 +217,6 @@ pub enum Error {
     },
     RasterDataTypeNotSupportByGdal,
 
-    ExternalAddressNotConfigured,
-
     MissingSpatialReference,
 
     WcsVersionNotSupported,
@@ -223,10 +228,11 @@ pub enum Error {
 
     PangaeaNoTsv,
     GfbioMissingAbcdField,
-    ExpectedExternalDatasetId,
-    InvalidExternalDatasetId {
-        provider: DatasetProviderId,
+    ExpectedExternalDataId,
+    InvalidExternalDataId {
+        provider: DataProviderId,
     },
+    InvalidDataId,
 
     #[cfg(feature = "nature40")]
     Nature40UnknownRasterDbname,
@@ -312,20 +318,72 @@ pub enum Error {
     },
     MissingNFDIMetaData,
 
+    #[cfg(feature = "ebv")]
     #[snafu(context(false))]
     NetCdfCf4DProvider {
         source: NetCdfCf4DProviderError,
     },
+    #[cfg(feature = "nfdi")]
+    #[snafu(display("Could not parse GFBio basket: {}", message,))]
+    GFBioBasketParse {
+        message: String,
+    },
 
-    #[cfg(feature = "ebv")]
+    BaseUrlMustEndWithSlash,
+
     #[snafu(context(false))]
-    EbvHandler {
-        source: crate::handlers::ebv::EbvError,
+    LayerDb {
+        source: crate::layers::storage::LayerDbError,
+    },
+
+    UnknownOperator {
+        operator: String,
+    },
+
+    IdStringMustBeUuid {
+        found: String,
+    },
+
+    #[snafu(context(false))]
+    TaskError {
+        source: crate::tasks::TaskError,
+    },
+
+    UnknownLayerCollectionId {
+        id: LayerCollectionId,
+    },
+    UnknownLayerId {
+        id: LayerId,
+    },
+    InvalidLayerCollectionId,
+    InvalidLayerId,
+
+    #[snafu(context(false))]
+    WorkflowApi {
+        source: crate::handlers::workflows::WorkflowApiError,
+    },
+
+    SubPathMustNotEscapeBasePath {
+        base: PathBuf,
+        sub_path: PathBuf,
+    },
+
+    PathMustNotContainParentReferences {
+        base: PathBuf,
+        sub_path: PathBuf,
+    },
+
+    #[cfg(feature = "pro")]
+    #[snafu(context(false))]
+    OidcError {
+        source: crate::pro::users::OidcError,
     },
 }
 
 impl actix_web::error::ResponseError for Error {
     fn error_response(&self) -> HttpResponse {
+        // TODO: rethink this error handling since errors
+        // only have `Display`, `Debug` and `Error` implementations
         let (error, message) = match self {
             Error::Authorization { source } => (
                 Into::<&str>::into(source.as_ref()).to_string(),
@@ -448,9 +506,3 @@ impl From<tokio::task::JoinError> for Error {
         Error::TokioJoin { source }
     }
 }
-
-pub trait ErrorSource: std::error::Error + Send + Sync + 'static + AsErrorSource {}
-
-impl ErrorSource for dyn std::error::Error + Send + Sync + 'static {}
-
-impl<T> ErrorSource for T where T: std::error::Error + Send + Sync + 'static {}

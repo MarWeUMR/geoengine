@@ -1,16 +1,33 @@
-use crate::call_generic_raster_processor;
+use crate::adapters::SparseTilesFillAdapter;
 use crate::engine::{
-    InitializedRasterOperator, OperatorDatasets, RasterOperator, RasterQueryProcessor,
+    InitializedRasterOperator, OperatorData, RasterOperator, RasterQueryProcessor,
     RasterResultDescriptor, SourceOperator, TypedRasterQueryProcessor,
 };
 use crate::util::Result;
 use async_trait::async_trait;
 use futures::{stream, stream::StreamExt};
-use geoengine_datatypes::dataset::DatasetId;
+use geoengine_datatypes::dataset::DataId;
 use geoengine_datatypes::primitives::{RasterQueryRectangle, SpatialPartitioned};
-use geoengine_datatypes::raster::{ConvertDataType, FromPrimitive, Pixel, RasterTile2D};
-use num_traits::AsPrimitive;
+use geoengine_datatypes::raster::{
+    GridShape2D, GridShapeAccess, GridSize, Pixel, RasterTile2D, TilingSpecification,
+};
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
+
+#[derive(Debug, Snafu)]
+pub enum MockRasterSourceError {
+    #[snafu(display(
+        "A tile has a shape [y: {}, x: {}] which does not match the tiling speciications tile shape (y,x) [y: {}, x: {}].",
+        tiling_specification_yx.axis_size()[0],
+        tiling_specification_yx.axis_size()[1],
+        tile_size_yx.axis_size()[0],
+        tile_size_yx.axis_size()[1],
+    ))]
+    TileSizeDiffersFromTilingSpecification {
+        tiling_specification_yx: GridShape2D,
+        tile_size_yx: GridShape2D,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct MockRasterSourceProcessor<T>
@@ -18,15 +35,59 @@ where
     T: Pixel,
 {
     pub data: Vec<RasterTile2D<T>>,
+    pub tiling_specification: TilingSpecification,
 }
 
 impl<T> MockRasterSourceProcessor<T>
 where
     T: Pixel,
 {
-    fn new(data: Vec<RasterTile2D<T>>) -> Self {
-        Self { data }
+    fn new_unchecked(
+        data: Vec<RasterTile2D<T>>,
+        tiling_specification: TilingSpecification,
+    ) -> Self {
+        Self {
+            data,
+            tiling_specification,
+        }
     }
+
+    fn _new(
+        data: Vec<RasterTile2D<T>>,
+        tiling_specification: TilingSpecification,
+    ) -> Result<Self, MockRasterSourceError> {
+        if let Some(tile_shape) =
+            first_tile_shape_not_matching_tiling_spec(&data, tiling_specification)
+        {
+            return Err(
+                MockRasterSourceError::TileSizeDiffersFromTilingSpecification {
+                    tiling_specification_yx: tiling_specification.grid_shape(),
+                    tile_size_yx: tile_shape,
+                },
+            );
+        };
+
+        Ok(Self {
+            data,
+            tiling_specification,
+        })
+    }
+}
+
+fn first_tile_shape_not_matching_tiling_spec<T>(
+    tiles: &[RasterTile2D<T>],
+    tiling_spec: TilingSpecification,
+) -> Option<GridShape2D>
+where
+    T: Pixel,
+{
+    for tile in tiles {
+        if tile.grid_shape() != tiling_spec.grid_shape() {
+            return Some(tile.grid_shape());
+        }
+    }
+
+    None
 }
 
 #[async_trait]
@@ -41,7 +102,7 @@ where
         _ctx: &'a dyn crate::engine::QueryContext,
     ) -> Result<futures::stream::BoxStream<crate::util::Result<RasterTile2D<Self::RasterType>>>>
     {
-        Ok(stream::iter(
+        let inner_stream = stream::iter(
             self.data
                 .iter()
                 .filter(move |t| {
@@ -52,6 +113,29 @@ where
                 })
                 .cloned()
                 .map(Result::Ok),
+        );
+
+        // TODO: evaluate if there are GeoTransforms with positive y-axis
+        // The "Pixel-space" starts at the top-left corner of a `GeoTransform`.
+        // Therefore, the pixel size on the x-axis is always increasing
+        let spatial_resolution = query.spatial_resolution;
+
+        let pixel_size_x = spatial_resolution.x;
+        debug_assert!(pixel_size_x.is_sign_positive());
+        // and the pixel size on  the y-axis is always decreasing
+        let pixel_size_y = spatial_resolution.y * -1.0;
+        debug_assert!(pixel_size_y.is_sign_negative());
+
+        let tiling_strategy = self
+            .tiling_specification
+            .strategy(pixel_size_x, pixel_size_y);
+
+        // use SparseTilesFillAdapter to fill all the gaps
+        Ok(SparseTilesFillAdapter::new(
+            inner_stream,
+            tiling_strategy.tile_grid_box(query.spatial_partition()),
+            tiling_strategy.geo_transform,
+            tiling_strategy.tile_size_in_pixels,
         )
         .boxed())
     }
@@ -66,8 +150,8 @@ pub struct MockRasterSourceParams<T: Pixel> {
 
 pub type MockRasterSource<T> = SourceOperator<MockRasterSourceParams<T>>;
 
-impl<T: Pixel> OperatorDatasets for MockRasterSource<T> {
-    fn datasets_collect(&self, _datasets: &mut Vec<DatasetId>) {}
+impl<T: Pixel> OperatorData for MockRasterSource<T> {
+    fn data_ids_collect(&self, _data_ids: &mut Vec<DataId>) {}
 }
 
 /// Implement a mock raster source with typetag for a specific generic type
@@ -78,7 +162,7 @@ impl<T: Pixel> OperatorDatasets for MockRasterSource<T> {
 ///
 /// TODO: implementation is done with `paste!`, but we can use `core::concat_idents` once its stable
 ///
-/// ```no_run
+/// ```ignore
 /// #[typetag::serde]
 /// #[async_trait]
 /// impl<T: Pixel> RasterOperator for MockRasterSource<T> {
@@ -113,11 +197,27 @@ macro_rules! impl_mock_raster_source {
         impl RasterOperator for $newtype {
             async fn initialize(
                 self: Box<Self>,
-                _context: &dyn crate::engine::ExecutionContext,
+                context: &dyn crate::engine::ExecutionContext,
             ) -> Result<Box<dyn InitializedRasterOperator>> {
+                let data = self.params.data;
+                let tiling_specification = context.tiling_specification();
+
+                if let Some(tile_shape) =
+                    first_tile_shape_not_matching_tiling_spec(&data, tiling_specification)
+                {
+                    return Err(
+                        MockRasterSourceError::TileSizeDiffersFromTilingSpecification {
+                            tiling_specification_yx: tiling_specification.grid_shape(),
+                            tile_size_yx: tile_shape,
+                        }
+                        .into(),
+                    );
+                };
+
                 Ok(InitializedMockRasterSource {
                     result_descriptor: self.params.result_descriptor,
-                    data: self.params.data,
+                    data,
+                    tiling_specification,
                 }
                 .boxed())
             }
@@ -139,29 +239,20 @@ impl_mock_raster_source!(f64);
 pub struct InitializedMockRasterSource<T: Pixel> {
     result_descriptor: RasterResultDescriptor,
     data: Vec<RasterTile2D<T>>,
+    tiling_specification: TilingSpecification,
 }
 
-impl<T: Pixel> InitializedRasterOperator for InitializedMockRasterSource<T> {
+impl<T: Pixel> InitializedRasterOperator for InitializedMockRasterSource<T>
+where
+    TypedRasterQueryProcessor: From<std::boxed::Box<dyn RasterQueryProcessor<RasterType = T>>>,
+{
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
-        fn converted<From, To>(
-            raster_tiles: &[RasterTile2D<From>],
-        ) -> Box<dyn RasterQueryProcessor<RasterType = To>>
-        where
-            From: Pixel + AsPrimitive<To>,
-            To: Pixel + FromPrimitive<From>,
-        {
-            let data: Vec<RasterTile2D<To>> = raster_tiles
-                .iter()
-                .cloned()
-                .map(RasterTile2D::convert_data_type)
-                .collect();
-            MockRasterSourceProcessor::new(data).boxed()
-        }
+        let processor = TypedRasterQueryProcessor::from(
+            MockRasterSourceProcessor::new_unchecked(self.data.clone(), self.tiling_specification)
+                .boxed(),
+        );
 
-        Ok(call_generic_raster_processor!(
-            self.result_descriptor().data_type,
-            converted(&self.data)
-        ))
+        Ok(processor)
     }
 
     fn result_descriptor(&self) -> &RasterResultDescriptor {
@@ -174,7 +265,7 @@ mod tests {
     use super::*;
     use crate::engine::MockExecutionContext;
     use geoengine_datatypes::primitives::Measurement;
-    use geoengine_datatypes::raster::RasterDataType;
+    use geoengine_datatypes::raster::{MaskedGrid, RasterDataType};
     use geoengine_datatypes::util::test::TestDefault;
     use geoengine_datatypes::{
         primitives::TimeInterval,
@@ -184,8 +275,8 @@ mod tests {
 
     #[tokio::test]
     async fn serde() {
-        let no_data_value = None;
-        let raster = Grid2D::new([3, 2].into(), vec![1_u8, 2, 3, 4, 5, 6], no_data_value).unwrap();
+        let raster =
+            MaskedGrid::from(Grid2D::new([3, 2].into(), vec![1_u8, 2, 3, 4, 5, 6]).unwrap());
 
         let raster_tile = RasterTile2D::new_with_tile_info(
             TimeInterval::default(),
@@ -204,13 +295,14 @@ mod tests {
                     data_type: RasterDataType::U8,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     measurement: Measurement::Unitless,
-                    no_data_value: no_data_value.map(AsPrimitive::as_),
+                    time: None,
+                    bbox: None,
                 },
             },
         }
         .boxed();
 
-        let serialized = serde_json::to_string(&mrs).unwrap();
+        let serialized = serde_json::to_value(&mrs).unwrap();
 
         let spec = serde_json::json!({
             "type": "MockRasterSourceu8",
@@ -231,11 +323,18 @@ mod tests {
                     },
                     "gridArray": {
                         "type": "grid",
-                        "shape": {
-                            "shapeArray": [3, 2]
+                        "innerGrid" : {
+                            "shape": {
+                                "shapeArray": [3, 2]
+                            },
+                            "data": [1, 2, 3, 4, 5, 6],
                         },
-                        "data": [1, 2, 3, 4, 5, 6],
-                        "noDataValue": null
+                        "validityMask": {
+                            "shape": {
+                                "shapeArray": [3, 2]
+                            },
+                            "data": [true, true, true, true, true, true],
+                        }
                     },
                     "properties":{
                         "scale":null,
@@ -250,16 +349,22 @@ mod tests {
                     "measurement": {
                         "type": "unitless"
                     },
-                    "noDataValue": null
+                    "time": null,
+                    "bbox": null
                 }
             }
-        })
-        .to_string();
+        });
         assert_eq!(serialized, spec);
 
-        let deserialized: Box<dyn RasterOperator> = serde_json::from_str(&serialized).unwrap();
+        let deserialized: Box<dyn RasterOperator> = serde_json::from_value(serialized).unwrap();
 
-        let execution_context = MockExecutionContext::test_default();
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let execution_context = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let initialized = deserialized.initialize(&execution_context).await.unwrap();
 

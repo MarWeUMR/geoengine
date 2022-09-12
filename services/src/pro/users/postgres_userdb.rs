@@ -2,6 +2,7 @@ use crate::contexts::SessionId;
 use crate::error::Result;
 use crate::pro::datasets::Role;
 use crate::pro::projects::ProjectPermission;
+use crate::pro::users::oidc::ExternalUserClaims;
 use crate::pro::users::{
     User, UserCredentials, UserDb, UserId, UserInfo, UserRegistration, UserSession,
 };
@@ -15,6 +16,7 @@ use bb8_postgres::{
     bb8::Pool, tokio_postgres::tls::MakeTlsConnect, tokio_postgres::tls::TlsConnect,
     tokio_postgres::Socket,
 };
+use geoengine_datatypes::primitives::Duration;
 use pwhash::bcrypt;
 use uuid::Uuid;
 
@@ -50,7 +52,7 @@ where
 {
     // TODO: clean up expired sessions?
 
-    async fn register(&mut self, user: Validated<UserRegistration>) -> Result<UserId> {
+    async fn register(&self, user: Validated<UserRegistration>) -> Result<UserId> {
         let mut conn = self.conn_pool.get().await?;
 
         let tx = conn.build_transaction().start().await?;
@@ -96,7 +98,7 @@ where
         Ok(user.id)
     }
 
-    async fn anonymous(&mut self) -> Result<UserSession> {
+    async fn anonymous(&self) -> Result<UserSession> {
         let mut conn = self.conn_pool.get().await?;
 
         let tx = conn.build_transaction().start().await?;
@@ -165,7 +167,7 @@ where
         })
     }
 
-    async fn login(&mut self, user_credentials: UserCredentials) -> Result<UserSession> {
+    async fn login(&self, user_credentials: UserCredentials) -> Result<UserSession> {
         let conn = self.conn_pool.get().await?;
         let stmt = conn
             .prepare("SELECT id, password_hash, email, real_name FROM users WHERE email = $1;")
@@ -234,7 +236,119 @@ where
         }
     }
 
-    async fn logout(&mut self, session: SessionId) -> Result<()> {
+    async fn login_external(
+        &self,
+        user: ExternalUserClaims,
+        duration: Duration,
+    ) -> Result<UserSession> {
+        let mut conn = self.conn_pool.get().await?;
+        let stmt = conn
+            .prepare("SELECT id, external_id, email, real_name FROM external_users WHERE external_id = $1;")
+            .await?;
+
+        let row = conn
+            .query_opt(&stmt, &[&user.external_id.to_string()])
+            .await
+            .map_err(|_error| error::Error::LoginFailed)?;
+
+        let user_id = match row {
+            Some(row) => UserId(row.get(0)),
+            None => {
+                let tx = conn.build_transaction().start().await?;
+
+                let user_id = UserId::new();
+
+                let stmt = tx
+                    .prepare("INSERT INTO roles (id, name) VALUES ($1, $2);")
+                    .await?;
+                tx.execute(&stmt, &[&user_id, &user.email]).await?;
+
+                //TODO: Inconsistent to hashmap implementation, where an external user is not part of the user database.
+                //TODO: A user might be able to login without external login using this (internal) id. Would be a problem with anonymous users as well.
+                let stmt = tx
+                    .prepare("INSERT INTO users (id, active) VALUES ($1, TRUE);")
+                    .await?;
+                tx.execute(&stmt, &[&user_id]).await?;
+
+                let stmt = tx
+                    .prepare(
+                        "INSERT INTO external_users (id, external_id, email, real_name, active) VALUES ($1, $2, $3, $4, $5);",
+                    )
+                    .await?;
+
+                tx.execute(
+                    &stmt,
+                    &[
+                        &user_id,
+                        &user.external_id.to_string(),
+                        &user.email,
+                        &user.real_name,
+                        &true,
+                    ],
+                )
+                .await?;
+
+                let stmt = tx
+                    .prepare("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2);")
+                    .await?;
+                tx.execute(&stmt, &[&user_id, &user_id]).await?;
+
+                let stmt = tx
+                    .prepare("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2);")
+                    .await?;
+                tx.execute(&stmt, &[&user_id, &Role::user_role_id()])
+                    .await?;
+
+                tx.commit().await?;
+
+                user_id
+            }
+        };
+
+        let session_id = SessionId::new();
+        let stmt = conn
+            .prepare(
+                "
+            INSERT INTO sessions (id, user_id, created, valid_until)
+            VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + make_interval(secs:=$3))
+            RETURNING created, valid_until;",
+            )
+            .await?; //TODO: Check documentation if inconsistent to hashmap implementation - would happen if CURRENT_TIMESTAMP is called twice in postgres for a single query. Worked in tests.
+
+        let row = conn
+            .query_one(
+                &stmt,
+                &[&session_id, &user_id, &(duration.num_seconds() as f64)],
+            )
+            .await?;
+
+        let stmt = conn
+            .prepare("SELECT role_id FROM user_roles WHERE user_id = $1;")
+            .await?;
+
+        let rows = conn
+            .query(&stmt, &[&user_id])
+            .await
+            .map_err(|_error| error::Error::LoginFailed)?;
+
+        let roles = rows.into_iter().map(|row| row.get(0)).collect();
+
+        Ok(UserSession {
+            id: session_id,
+            user: UserInfo {
+                id: user_id,
+                email: Some(user.email.clone()),
+                real_name: Some(user.real_name.clone()),
+            },
+            created: row.get(0),
+            valid_until: row.get(1),
+            project: None,
+            view: None,
+            roles,
+        })
+    }
+
+    async fn logout(&self, session: SessionId) -> Result<()> {
         let conn = self.conn_pool.get().await?;
         let stmt = conn
             .prepare("DELETE FROM sessions WHERE id = $1;") // TODO: only invalidate session?
@@ -284,11 +398,7 @@ where
         })
     }
 
-    async fn set_session_project(
-        &mut self,
-        session: &UserSession,
-        project: ProjectId,
-    ) -> Result<()> {
+    async fn set_session_project(&self, session: &UserSession, project: ProjectId) -> Result<()> {
         let conn = self.conn_pool.get().await?;
         PostgresContext::check_user_project_permission(
             &conn,
@@ -312,7 +422,7 @@ where
         Ok(())
     }
 
-    async fn set_session_view(&mut self, session: &UserSession, view: STRectangle) -> Result<()> {
+    async fn set_session_view(&self, session: &UserSession, view: STRectangle) -> Result<()> {
         let conn = self.conn_pool.get().await?;
         let stmt = conn
             .prepare("UPDATE sessions SET view = $1 WHERE id = $2;")

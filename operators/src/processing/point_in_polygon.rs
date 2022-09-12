@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use geoengine_datatypes::dataset::DatasetId;
+use geoengine_datatypes::dataset::DataId;
 use geoengine_datatypes::primitives::VectorQueryRectangle;
 use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use crate::engine::{
     ExecutionContext, InitializedVectorOperator, Operator, QueryContext, TypedVectorQueryProcessor,
     VectorOperator, VectorQueryProcessor, VectorResultDescriptor,
 };
-use crate::engine::{OperatorDatasets, QueryProcessor};
+use crate::engine::{OperatorData, QueryProcessor};
 use crate::error;
 use crate::util::Result;
 use arrow::array::BooleanArray;
@@ -44,10 +44,10 @@ pub struct PointInPolygonFilterSource {
     pub polygons: Box<dyn VectorOperator>,
 }
 
-impl OperatorDatasets for PointInPolygonFilterSource {
-    fn datasets_collect(&self, datasets: &mut Vec<DatasetId>) {
-        self.points.datasets_collect(datasets);
-        self.polygons.datasets_collect(datasets);
+impl OperatorData for PointInPolygonFilterSource {
+    fn data_ids_collect(&self, data_ids: &mut Vec<DataId>) {
+        self.points.data_ids_collect(data_ids);
+        self.polygons.data_ids_collect(data_ids);
     }
 }
 
@@ -61,23 +61,39 @@ impl VectorOperator for PointInPolygonFilter {
         let points = self.sources.points.initialize(context).await?;
         let polygons = self.sources.polygons.initialize(context).await?;
 
+        let points_rd = points.result_descriptor();
+        let polygons_rd = polygons.result_descriptor();
+
         ensure!(
-            points.result_descriptor().data_type == VectorDataType::MultiPoint,
+            points_rd.data_type == VectorDataType::MultiPoint,
             error::InvalidType {
                 expected: VectorDataType::MultiPoint.to_string(),
-                found: points.result_descriptor().data_type.to_string(),
+                found: points_rd.data_type.to_string(),
             }
         );
         ensure!(
-            polygons.result_descriptor().data_type == VectorDataType::MultiPolygon,
+            polygons_rd.data_type == VectorDataType::MultiPolygon,
             error::InvalidType {
                 expected: VectorDataType::MultiPolygon.to_string(),
-                found: polygons.result_descriptor().data_type.to_string(),
+                found: polygons_rd.data_type.to_string(),
             }
         );
 
+        ensure!(
+            points_rd.spatial_reference == polygons_rd.spatial_reference,
+            crate::error::InvalidSpatialReference {
+                expected: points_rd.spatial_reference,
+                found: polygons_rd.spatial_reference,
+            }
+        );
+
+        // We use the result descriptor of the points because in the worst case no feature will be excluded.
+        // We cannot use the polygon bbox because a `MultiPoint` could have one point within a polygon (and
+        // thus be included in the result) and one point outside of the bbox of the polygons.
+        let out_desc = points.result_descriptor().clone();
+
         let initialized_operator = InitializedPointInPolygonFilter {
-            result_descriptor: points.result_descriptor().clone(),
+            result_descriptor: out_desc,
             points,
             polygons,
         };
@@ -268,13 +284,16 @@ where
 mod tests {
 
     use super::*;
+    use std::str::FromStr;
 
     use geoengine_datatypes::primitives::{
         BoundingBox2D, Coordinate2D, MultiPoint, MultiPolygon, SpatialResolution, TimeInterval,
     };
+    use geoengine_datatypes::spatial_reference::SpatialReference;
     use geoengine_datatypes::util::test::TestDefault;
 
     use crate::engine::{ChunkByteSize, MockExecutionContext, MockQueryContext};
+    use crate::error::Error;
     use crate::mock::MockFeatureCollectionSource;
 
     #[test]
@@ -655,5 +674,52 @@ mod tests {
             .await;
 
         assert_eq!(result.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn it_checks_sref() {
+        let point_collection =
+            MultiPointCollection::from_data(vec![], vec![], Default::default()).unwrap();
+
+        let polygon_collection = MultiPolygonCollection::from_data(
+            vec![MultiPolygon::new(vec![vec![vec![
+                (0.0, 0.0).into(),
+                (10.0, 0.0).into(),
+                (10.0, 10.0).into(),
+                (0.0, 10.0).into(),
+                (0.0, 0.0).into(),
+            ]]])
+            .unwrap()],
+            vec![TimeInterval::default()],
+            Default::default(),
+        )
+        .unwrap();
+
+        let operator = PointInPolygonFilter {
+            params: PointInPolygonFilterParams {},
+            sources: PointInPolygonFilterSource {
+                points: MockFeatureCollectionSource::with_collections_and_sref(
+                    vec![point_collection],
+                    SpatialReference::epsg_4326(),
+                )
+                .boxed(),
+                polygons: MockFeatureCollectionSource::with_collections_and_sref(
+                    vec![polygon_collection],
+                    SpatialReference::from_str("EPSG:3857").unwrap(),
+                )
+                .boxed(),
+            },
+        }
+        .boxed()
+        .initialize(&MockExecutionContext::test_default())
+        .await;
+
+        assert!(matches!(
+            operator,
+            Err(Error::InvalidSpatialReference {
+                expected: _,
+                found: _,
+            })
+        ));
     }
 }

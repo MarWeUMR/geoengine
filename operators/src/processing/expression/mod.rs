@@ -1,17 +1,21 @@
 use self::{codegen::ExpressionAst, compiled::LinkedExpression, parser::ExpressionParser};
 use crate::{
     engine::{
-        ExecutionContext, InitializedRasterOperator, Operator, OperatorDatasets, RasterOperator,
+        ExecutionContext, InitializedRasterOperator, Operator, OperatorData, RasterOperator,
         RasterQueryProcessor, RasterResultDescriptor, TypedRasterQueryProcessor,
     },
     processing::expression::{codegen::Parameter, query_processor::ExpressionQueryProcessor},
-    util::{input::float_with_nan, Result},
+    util::Result,
 };
 use async_trait::async_trait;
-use geoengine_datatypes::{dataset::DatasetId, primitives::Measurement, raster::RasterDataType};
-use num_traits::AsPrimitive;
+use futures::try_join;
+use geoengine_datatypes::{
+    dataset::DataId,
+    primitives::{partitions_extent, time_interval_extent, Measurement},
+    raster::RasterDataType,
+};
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::ensure;
 
 pub use self::error::ExpressionError;
 
@@ -28,13 +32,14 @@ mod query_processor;
 /// * `output_type` is the data type of the produced raster tiles.
 /// * `output_no_data_value` is the no data value of the output raster
 /// * `output_measurement` is the measurement description of the output
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+///
+/// # Warning // TODO
+/// The operator *currently* only temporally aligns the inputs when there are exactly two sources
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpressionParams {
     pub expression: String,
     pub output_type: RasterDataType,
-    #[serde(with = "float_with_nan")]
-    pub output_no_data_value: f64, // TODO: check value is valid for given output type during deserialization
     pub output_measurement: Option<Measurement>,
     pub map_no_data: bool,
 }
@@ -45,6 +50,7 @@ pub struct ExpressionParams {
 pub type Expression = Operator<ExpressionParams, ExpressionSources>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::unsafe_derive_deserialize)] // TODO: remove if this warning is a glitch
 pub struct ExpressionSources {
     a: Box<dyn RasterOperator>,
     b: Option<Box<dyn RasterOperator>>,
@@ -56,10 +62,10 @@ pub struct ExpressionSources {
     h: Option<Box<dyn RasterOperator>>,
 }
 
-impl OperatorDatasets for ExpressionSources {
-    fn datasets_collect(&self, datasets: &mut Vec<DatasetId>) {
+impl OperatorData for ExpressionSources {
+    fn data_ids_collect(&self, data_ids: &mut Vec<DataId>) {
         for source in self.iter() {
-            source.datasets_collect(datasets);
+            source.data_ids_collect(data_ids);
         }
     }
 }
@@ -112,6 +118,7 @@ impl ExpressionSources {
         self.iter().count()
     }
 
+    #[allow(clippy::many_single_char_names)]
     async fn initialize(
         self,
         context: &dyn ExecutionContext,
@@ -120,15 +127,26 @@ impl ExpressionSources {
             return Err(ExpressionError::SourcesMustBeConsecutive.into());
         }
 
+        let (a, b, c, d, e, f, g, h) = try_join!(
+            self.a.initialize(context),
+            Self::initialize_source(self.b, context),
+            Self::initialize_source(self.c, context),
+            Self::initialize_source(self.d, context),
+            Self::initialize_source(self.e, context),
+            Self::initialize_source(self.f, context),
+            Self::initialize_source(self.g, context),
+            Self::initialize_source(self.h, context),
+        )?;
+
         Ok(ExpressionInitializedSources {
-            a: self.a.initialize(context).await?,
-            b: Self::initialize_source(self.b, context).await?,
-            c: Self::initialize_source(self.c, context).await?,
-            d: Self::initialize_source(self.d, context).await?,
-            e: Self::initialize_source(self.e, context).await?,
-            f: Self::initialize_source(self.f, context).await?,
-            g: Self::initialize_source(self.g, context).await?,
-            h: Self::initialize_source(self.h, context).await?,
+            a,
+            b,
+            c,
+            d,
+            e,
+            f,
+            g,
+            h,
         })
     }
 
@@ -213,15 +231,10 @@ impl RasterOperator for Expression {
 
         // we refer to rasters by A, B, C, …
         let parameters = (0..self.sources.number_of_sources())
-            .flat_map(|i| {
+            .map(|i| {
                 let parameter = index_to_parameter(i);
-                let boolean_parameter = format!("{}_is_nodata", &parameter);
-                [
-                    Parameter::Number(parameter.into()),
-                    Parameter::Boolean(boolean_parameter.into()),
-                ]
+                Parameter::Number(parameter.into())
             })
-            .chain([Parameter::Number("out_nodata".into())])
             .collect::<Vec<_>>();
 
         let expression = ExpressionParser::new(&parameters)?.parse(
@@ -229,21 +242,16 @@ impl RasterOperator for Expression {
             &self.params.expression,
         )?;
 
-        ensure!(
-            self.params
-                .output_type
-                .is_valid(self.params.output_no_data_value),
-            crate::error::InvalidNoDataValueValueForOutputDataType
-        );
-
         let sources = self.sources.initialize(context).await?;
 
         let spatial_reference = sources.a.result_descriptor().spatial_reference;
 
-        for other_spatial_reference in sources
+        let in_descriptors = sources
             .iter()
-            .skip(1)
-            .map(|source| source.result_descriptor().spatial_reference)
+            .map(InitializedRasterOperator::result_descriptor)
+            .collect::<Vec<_>>();
+
+        for other_spatial_reference in in_descriptors.iter().skip(1).map(|rd| rd.spatial_reference)
         {
             ensure!(
                 spatial_reference == other_spatial_reference,
@@ -254,6 +262,9 @@ impl RasterOperator for Expression {
             );
         }
 
+        let time = time_interval_extent(in_descriptors.iter().map(|d| d.time));
+        let bbox = partitions_extent(in_descriptors.iter().map(|d| d.bbox));
+
         let result_descriptor = RasterResultDescriptor {
             data_type: self.params.output_type,
             spatial_reference,
@@ -262,7 +273,8 @@ impl RasterOperator for Expression {
                 .output_measurement
                 .as_ref()
                 .map_or(Measurement::Unitless, Measurement::clone),
-            no_data_value: Some(self.params.output_no_data_value), // TODO: is it possible to have none?
+            time,
+            bbox,
         };
 
         let initialized_operator = InitializedExpression {
@@ -315,11 +327,6 @@ impl ExpressionInitializedSources {
 impl InitializedRasterOperator for InitializedExpression {
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
         let output_type = self.result_descriptor().data_type;
-        // TODO: allow processing expression without NO DATA
-        let output_no_data_value = self
-            .result_descriptor()
-            .no_data_value
-            .context(error::MissingOutputNoDataValue)?;
 
         let expression = LinkedExpression::new(&self.expression)?;
 
@@ -335,13 +342,8 @@ impl InitializedRasterOperator for InitializedExpression {
                 let query_processor = a.into_f64();
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processor,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processor, self.map_no_data)
+                        .boxed()
                 )
 
                 // TODO: We could save prior conversions by monomophizing the differnt expressions
@@ -365,13 +367,8 @@ impl InitializedRasterOperator for InitializedExpression {
                 let query_processors = (a.into_f64(), b.into_f64());
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
 
                 // TODO: We could save prior conversions by monomophizing the differnt expressions
@@ -392,80 +389,61 @@ impl InitializedRasterOperator for InitializedExpression {
             3 => {
                 let [a, b, c] =
                     <[_; 3]>::try_from(query_processors).expect("len previously checked");
-                let query_processors = (a.into_f64(), b.into_f64(), c.into_f64());
+                let query_processors = [a.into_f64(), b.into_f64(), c.into_f64()];
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
             }
             4 => {
                 let [a, b, c, d] =
                     <[_; 4]>::try_from(query_processors).expect("len previously checked");
-                let query_processors = (a.into_f64(), b.into_f64(), c.into_f64(), d.into_f64());
+                let query_processors = [a.into_f64(), b.into_f64(), c.into_f64(), d.into_f64()];
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
             }
             5 => {
                 let [a, b, c, d, e] =
                     <[_; 5]>::try_from(query_processors).expect("len previously checked");
-                let query_processors = (
+                let query_processors = [
                     a.into_f64(),
                     b.into_f64(),
                     c.into_f64(),
                     d.into_f64(),
                     e.into_f64(),
-                );
+                ];
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
             }
             6 => {
                 let [a, b, c, d, e, f] =
                     <[_; 6]>::try_from(query_processors).expect("len previously checked");
-                let query_processors = (
+                let query_processors = [
                     a.into_f64(),
                     b.into_f64(),
                     c.into_f64(),
                     d.into_f64(),
                     e.into_f64(),
                     f.into_f64(),
-                );
+                ];
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
             }
+
             7 => {
                 let [a, b, c, d, e, f, g] =
                     <[_; 7]>::try_from(query_processors).expect("len previously checked");
-                let query_processors = (
+                let query_processors = [
                     a.into_f64(),
                     b.into_f64(),
                     c.into_f64(),
@@ -473,22 +451,17 @@ impl InitializedRasterOperator for InitializedExpression {
                     e.into_f64(),
                     f.into_f64(),
                     g.into_f64(),
-                );
+                ];
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
             }
             8 => {
                 let [a, b, c, d, e, f, g, h] =
                     <[_; 8]>::try_from(query_processors).expect("len previously checked");
-                let query_processors = (
+                let query_processors = [
                     a.into_f64(),
                     b.into_f64(),
                     c.into_f64(),
@@ -497,16 +470,11 @@ impl InitializedRasterOperator for InitializedExpression {
                     f.into_f64(),
                     g.into_f64(),
                     h.into_f64(),
-                );
+                ];
                 call_generic_raster_processor!(
                     output_type,
-                    ExpressionQueryProcessor::new(
-                        expression,
-                        query_processors,
-                        output_no_data_value.as_(),
-                        self.map_no_data,
-                    )
-                    .boxed()
+                    ExpressionQueryProcessor::new(expression, query_processors, self.map_no_data)
+                        .boxed()
                 )
             }
             _ => return Err(crate::error::Error::InvalidNumberOfExpressionInputs),
@@ -527,20 +495,23 @@ mod tests {
     use geoengine_datatypes::primitives::{
         Measurement, RasterQueryRectangle, SpatialPartition2D, SpatialResolution, TimeInterval,
     };
-    use geoengine_datatypes::raster::{Grid2D, RasterTile2D, TileInformation};
+    use geoengine_datatypes::raster::{
+        Grid2D, GridOrEmpty, MapElements, MaskedGrid2D, RasterTile2D, TileInformation,
+        TilingSpecification,
+    };
     use geoengine_datatypes::spatial_reference::SpatialReference;
     use geoengine_datatypes::util::test::TestDefault;
 
     #[test]
     fn deserialize_params() {
-        let s = r#"{"expression":"1*A","outputType":"F64","outputNoDataValue":0.0,"outputMeasurement":null,"mapNoData":false}"#;
+        let s =
+            r#"{"expression":"1*A","outputType":"F64","outputMeasurement":null,"mapNoData":false}"#;
 
         assert_eq!(
             serde_json::from_str::<ExpressionParams>(s).unwrap(),
             ExpressionParams {
                 expression: "1*A".to_owned(),
                 output_type: RasterDataType::F64,
-                output_no_data_value: 0.0,
                 output_measurement: None,
                 map_no_data: false,
             }
@@ -548,33 +519,15 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_params_no_data() {
-        let s = r#"{"expression":"1*A","outputType":"F64","outputNoDataValue":"nan","outputMeasurement":null,"mapNoData":false}"#;
-
-        assert!(f64::is_nan(
-            serde_json::from_str::<ExpressionParams>(s)
-                .unwrap()
-                .output_no_data_value
-        ),);
-    }
-
-    #[test]
-    fn deserialize_params_missing_no_data() {
-        let s = r#"{"expression":"1*A","outputType":"F64","outputNoDataValue":null,"outputMeasurement":null,"mapNoData":false}"#;
-
-        assert!(serde_json::from_str::<ExpressionParams>(s).is_err());
-    }
-
-    #[test]
     fn serialize_params() {
-        let s = r#"{"expression":"1*A","outputType":"F64","outputNoDataValue":0.0,"outputMeasurement":null,"mapNoData":false}"#;
+        let s =
+            r#"{"expression":"1*A","outputType":"F64","outputMeasurement":null,"mapNoData":false}"#;
 
         assert_eq!(
             s,
             serde_json::to_string(&ExpressionParams {
                 expression: "1*A".to_owned(),
                 output_type: RasterDataType::F64,
-                output_no_data_value: 0.0,
                 output_measurement: None,
                 map_no_data: false,
             })
@@ -584,14 +537,14 @@ mod tests {
 
     #[test]
     fn serialize_params_no_data() {
-        let s = r#"{"expression":"1*A","outputType":"F64","outputNoDataValue":"nan","outputMeasurement":null,"mapNoData":false}"#;
+        let s =
+            r#"{"expression":"1*A","outputType":"F64","outputMeasurement":null,"mapNoData":false}"#;
 
         assert_eq!(
             s,
             serde_json::to_string(&ExpressionParams {
                 expression: "1*A".to_owned(),
                 output_type: RasterDataType::F64,
-                output_no_data_value: f64::NAN,
                 output_measurement: None,
                 map_no_data: false,
             })
@@ -601,8 +554,13 @@ mod tests {
 
     #[tokio::test]
     async fn basic_unary() {
-        let no_data_value = 3;
-        let no_data_value_option = Some(no_data_value);
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(Some(3));
 
@@ -610,7 +568,6 @@ mod tests {
             params: ExpressionParams {
                 expression: "2 * A".to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_value to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: false,
             },
@@ -626,7 +583,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ctx)
         .await
         .unwrap();
 
@@ -637,8 +594,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -654,20 +611,25 @@ mod tests {
 
         assert_eq!(
             result[0].as_ref().unwrap().grid_array,
-            Grid2D::new(
-                [3, 2].into(),
-                vec![2, 4, 3, 8, 10, 12],
-                no_data_value_option,
+            GridOrEmpty::from(
+                MaskedGrid2D::new(
+                    Grid2D::new([3, 2].into(), vec![2, 4, 0, 8, 10, 12],).unwrap(),
+                    Grid2D::new([3, 2].into(), vec![true, true, false, true, true, true],).unwrap()
+                )
+                .unwrap()
             )
-            .unwrap()
-            .into()
         );
     }
 
     #[tokio::test]
     async fn unary_map_no_data() {
-        let no_data_value = 3;
-        let no_data_value_option = Some(no_data_value);
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(Some(3));
 
@@ -675,7 +637,6 @@ mod tests {
             params: ExpressionParams {
                 expression: "2 * A".to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_value to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: true,
             },
@@ -691,7 +652,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ctx)
         .await
         .unwrap();
 
@@ -702,8 +663,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -719,20 +680,25 @@ mod tests {
 
         assert_eq!(
             result[0].as_ref().unwrap().grid_array,
-            Grid2D::new(
-                [3, 2].into(),
-                vec![2, 4, 6, 8, 10, 12],
-                no_data_value_option,
+            GridOrEmpty::from(
+                MaskedGrid2D::new(
+                    Grid2D::new([3, 2].into(), vec![2, 4, 0, 8, 10, 12],).unwrap(), // pixels with no data are turned to Default::default wich is 0. And 0 is the out_no_data value.
+                    Grid2D::new([3, 2].into(), vec![true, true, false, true, true, true],).unwrap()
+                )
+                .unwrap()
             )
-            .unwrap()
-            .into()
         );
     }
 
     #[tokio::test]
     async fn basic_binary() {
-        let no_data_value = 42;
-        let no_data_value_option = Some(no_data_value);
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(None);
         let raster_b = make_raster(None);
@@ -741,7 +707,6 @@ mod tests {
             params: ExpressionParams {
                 expression: "A+B".to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_valuee to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: false,
             },
@@ -757,7 +722,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ctx)
         .await
         .unwrap();
 
@@ -768,8 +733,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -785,20 +750,21 @@ mod tests {
 
         assert_eq!(
             result[0].as_ref().unwrap().grid_array,
-            Grid2D::new(
-                [3, 2].into(),
-                vec![2, 4, 6, 8, 10, 12],
-                no_data_value_option,
-            )
-            .unwrap()
-            .into()
+            Grid2D::new([3, 2].into(), vec![2, 4, 6, 8, 10, 12],)
+                .unwrap()
+                .into()
         );
     }
 
     #[tokio::test]
     async fn basic_coalesce() {
-        let no_data_value = 42;
-        let no_data_value_option = Some(no_data_value);
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(Some(3));
         let raster_b = make_raster(None);
@@ -806,15 +772,14 @@ mod tests {
         let o = Expression {
             params: ExpressionParams {
                 expression: "if A IS NODATA {
-                    B * 2
-                } else if A == 6 {
-                    out_nodata
-                } else {
-                    A
-                }"
+                       B * 2
+                   } else if A == 6 {
+                       NODATA
+                   } else {
+                       A
+                   }"
                 .to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_valuee to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: true,
             },
@@ -830,7 +795,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ctx)
         .await
         .unwrap();
 
@@ -841,8 +806,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -858,9 +823,13 @@ mod tests {
 
         assert_eq!(
             result[0].as_ref().unwrap().grid_array,
-            Grid2D::new([3, 2].into(), vec![1, 2, 6, 4, 5, 42], no_data_value_option,)
+            GridOrEmpty::from(
+                MaskedGrid2D::new(
+                    Grid2D::new([3, 2].into(), vec![1, 2, 6, 4, 5, 0],).unwrap(),
+                    Grid2D::new([3, 2].into(), vec![true, true, true, true, true, false],).unwrap()
+                )
                 .unwrap()
-                .into()
+            )
         );
     }
 
@@ -868,6 +837,14 @@ mod tests {
     async fn basic_ternary() {
         let no_data_value = 3;
         let no_data_value_option = Some(no_data_value);
+
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(no_data_value_option);
         let raster_b = make_raster(no_data_value_option);
@@ -877,7 +854,6 @@ mod tests {
             params: ExpressionParams {
                 expression: "A+B+C".to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_valuee to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: false,
             },
@@ -893,7 +869,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ctx)
         .await
         .unwrap();
 
@@ -904,8 +880,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -919,15 +895,20 @@ mod tests {
 
         assert_eq!(result.len(), 1);
 
+        let first_result = result[0].as_ref().unwrap();
+
+        assert!(!first_result.is_empty());
+
+        let grid = match &first_result.grid_array {
+            GridOrEmpty::Grid(g) => g,
+            GridOrEmpty::Empty(_) => panic!(),
+        };
+
+        let res: Vec<Option<i8>> = grid.masked_element_deref_iterator().collect();
+
         assert_eq!(
-            result[0].as_ref().unwrap().grid_array,
-            Grid2D::new(
-                [3, 2].into(),
-                vec![3, 6, 3, 12, 15, 18],
-                no_data_value_option,
-            )
-            .unwrap()
-            .into()
+            res,
+            [Some(3), Some(6), None, Some(12), Some(15), Some(18)] // third is None is because all inputs are masked because 3 == no_data_value
         );
     }
 
@@ -935,6 +916,14 @@ mod tests {
     async fn octave_inputs() {
         let no_data_value = 0;
         let no_data_value_option = Some(no_data_value);
+
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ctx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(no_data_value_option);
         let raster_b = make_raster(no_data_value_option);
@@ -949,7 +938,6 @@ mod tests {
             params: ExpressionParams {
                 expression: "A+B+C+D+E+F+G+H".to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_valuee to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: false,
             },
@@ -965,7 +953,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ctx)
         .await
         .unwrap();
 
@@ -976,8 +964,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -993,20 +981,22 @@ mod tests {
 
         assert_eq!(
             result[0].as_ref().unwrap().grid_array,
-            Grid2D::new(
-                [3, 2].into(),
-                vec![8, 16, 24, 32, 40, 48],
-                no_data_value_option,
-            )
-            .unwrap()
-            .into()
+            Grid2D::new([3, 2].into(), vec![8, 16, 24, 32, 40, 48],)
+                .unwrap()
+                .into()
         );
     }
 
     #[tokio::test]
     async fn test_functions() {
-        let no_data_value = 42;
-        let no_data_value_option = Some(no_data_value);
+        let no_data_value = 0;
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
+        let ectx = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let raster_a = make_raster(Some(no_data_value));
 
@@ -1014,7 +1004,6 @@ mod tests {
             params: ExpressionParams {
                 expression: "min(A * pi(), 10)".to_string(),
                 output_type: RasterDataType::I8,
-                output_no_data_value: no_data_value.as_(), //  cast no_data_value to f64
                 output_measurement: Some(Measurement::Unitless),
                 map_no_data: false,
             },
@@ -1030,7 +1019,7 @@ mod tests {
             },
         }
         .boxed()
-        .initialize(&MockExecutionContext::test_default())
+        .initialize(&ectx)
         .await
         .unwrap();
 
@@ -1041,8 +1030,8 @@ mod tests {
             .query(
                 RasterQueryRectangle {
                     spatial_bounds: SpatialPartition2D::new_unchecked(
-                        (0., 4.).into(),
-                        (3., 0.).into(),
+                        (0., 3.).into(),
+                        (2., 0.).into(),
                     ),
                     time_interval: Default::default(),
                     spatial_resolution: SpatialResolution::one(),
@@ -1058,18 +1047,32 @@ mod tests {
 
         assert_eq!(
             result[0].as_ref().unwrap().grid_array,
-            Grid2D::new(
-                [3, 2].into(),
-                vec![3, 6, 9, 10, 10, 10],
-                no_data_value_option,
-            )
-            .unwrap()
-            .into()
+            Grid2D::new([3, 2].into(), vec![3, 6, 9, 10, 10, 10],)
+                .unwrap()
+                .into()
         );
     }
 
     fn make_raster(no_data_value: Option<i8>) -> Box<dyn RasterOperator> {
-        let raster = Grid2D::new([3, 2].into(), vec![1, 2, 3, 4, 5, 6], no_data_value).unwrap();
+        let raster = Grid2D::<i8>::new([3, 2].into(), vec![1, 2, 3, 4, 5, 6]).unwrap();
+
+        let real_raster = if let Some(no_data_value) = no_data_value {
+            MaskedGrid2D::from(raster)
+                .map_elements(|e| {
+                    if let Some(v) = e {
+                        if v == no_data_value {
+                            None
+                        } else {
+                            Some(v)
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .into()
+        } else {
+            GridOrEmpty::from(raster)
+        };
 
         let raster_tile = RasterTile2D::new_with_tile_info(
             TimeInterval::default(),
@@ -1078,7 +1081,7 @@ mod tests {
                 tile_size_in_pixels: [3, 2].into(),
                 global_geo_transform: TestDefault::test_default(),
             },
-            raster.into(),
+            real_raster,
         );
 
         MockRasterSource {
@@ -1088,7 +1091,8 @@ mod tests {
                     data_type: RasterDataType::I8,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     measurement: Measurement::Unitless,
-                    no_data_value: no_data_value.map(f64::from),
+                    time: None,
+                    bbox: None,
                 },
             },
         }

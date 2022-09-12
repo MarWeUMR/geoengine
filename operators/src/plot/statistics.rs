@@ -10,9 +10,12 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use futures::stream::select_all;
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
-use geoengine_datatypes::primitives::VectorQueryRectangle;
+use geoengine_datatypes::primitives::{
+    partitions_extent, time_interval_extent, AxisAlignedRectangle, BoundingBox2D,
+    VectorQueryRectangle,
+};
 use geoengine_datatypes::raster::ConvertDataTypeParallel;
-use geoengine_datatypes::raster::{Grid2D, GridOrEmpty, GridSize, NoDataValue};
+use geoengine_datatypes::raster::{GridOrEmpty, GridSize};
 use geoengine_datatypes::spatial_reference::SpatialReferenceOption;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
@@ -27,7 +30,7 @@ pub const STATISTICS_OPERATOR_NAME: &str = "Statistics";
 pub type Statistics = Operator<StatisticsParams, MultipleRasterSources>;
 
 /// The parameter spec for `Statistics`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatisticsParams {}
 
@@ -47,15 +50,21 @@ impl PlotOperator for Statistics {
         .await;
         let rasters = rasters.into_iter().collect::<Result<Vec<_>>>()?;
 
+        let in_descriptors = rasters
+            .iter()
+            .map(InitializedRasterOperator::result_descriptor)
+            .collect::<Vec<_>>();
+
         if rasters.len() > 1 {
-            let srs = rasters[0].result_descriptor().spatial_reference;
+            let srs = in_descriptors[0].spatial_reference;
             ensure!(
-                rasters
-                    .iter()
-                    .all(|op| op.result_descriptor().spatial_reference == srs),
+                in_descriptors.iter().all(|d| d.spatial_reference == srs),
                 error::AllSourcesMustHaveSameSpatialReference
             );
         }
+
+        let time = time_interval_extent(in_descriptors.iter().map(|d| d.time));
+        let bbox = partitions_extent(in_descriptors.iter().map(|d| d.bbox));
 
         let initialized_operator = InitializedStatistics {
             result_descriptor: PlotResultDescriptor {
@@ -63,6 +72,8 @@ impl PlotOperator for Statistics {
                     || SpatialReferenceOption::Unreferenced,
                     |r| r.result_descriptor().spatial_reference,
                 ),
+                time,
+                bbox: bbox.and_then(|p| BoundingBox2D::new(p.lower_left(), p.upper_right()).ok()),
             },
             rasters,
         };
@@ -134,7 +145,7 @@ impl PlotQueryProcessor for StatisticsQueryProcessor {
                     let mut number_statistics = number_statistics?;
                     let (i, raster_tile) = enumerated_raster_tile?;
                     match raster_tile.grid_array {
-                        GridOrEmpty::Grid(g) => process_raster(&mut number_statistics[i], &g),
+                        GridOrEmpty::Grid(g) => process_raster(&mut number_statistics[i], g.masked_element_deref_iterator()),
                         GridOrEmpty::Empty(n) => number_statistics[i].add_no_data_batch(n.number_of_elements())
                     }
 
@@ -149,21 +160,15 @@ impl PlotQueryProcessor for StatisticsQueryProcessor {
     }
 }
 
-#[allow(clippy::float_cmp)] // allow since NO DATA is a specific value
-fn process_raster(number_statistics: &mut NumberStatistics, tile_grid: &Grid2D<f64>) {
-    let no_data_value = tile_grid.no_data_value();
-
-    if let Some(no_data_value) = no_data_value {
-        for &value in &tile_grid.data {
-            if value == no_data_value {
-                number_statistics.add_no_data();
-            } else {
-                number_statistics.add(value);
-            }
-        }
-    } else {
-        for &value in &tile_grid.data {
+fn process_raster<I>(number_statistics: &mut NumberStatistics, data: I)
+where
+    I: Iterator<Item = Option<f64>>,
+{
+    for value_option in data {
+        if let Some(value) = value_option {
             number_statistics.add(value);
+        } else {
+            number_statistics.add_no_data();
         }
     }
 }
@@ -207,9 +212,10 @@ mod tests {
     use geoengine_datatypes::primitives::{
         BoundingBox2D, Measurement, SpatialResolution, TimeInterval,
     };
-    use geoengine_datatypes::raster::{Grid2D, RasterDataType, RasterTile2D, TileInformation};
+    use geoengine_datatypes::raster::{
+        Grid2D, RasterDataType, RasterTile2D, TileInformation, TilingSpecification,
+    };
     use geoengine_datatypes::spatial_reference::SpatialReference;
-    use num_traits::AsPrimitive;
 
     #[test]
     fn serialization() {
@@ -234,7 +240,12 @@ mod tests {
 
     #[tokio::test]
     async fn single_raster() {
-        let no_data_value = None;
+        let tile_size_in_pixels = [3, 2].into();
+        let tiling_specification = TilingSpecification {
+            origin_coordinate: [0.0, 0.0].into(),
+            tile_size_in_pixels,
+        };
+
         let raster_source = MockRasterSource {
             params: MockRasterSourceParams {
                 data: vec![RasterTile2D::new_with_tile_info(
@@ -242,9 +253,9 @@ mod tests {
                     TileInformation {
                         global_geo_transform: TestDefault::test_default(),
                         global_tile_position: [0, 0].into(),
-                        tile_size_in_pixels: [3, 2].into(),
+                        tile_size_in_pixels,
                     },
-                    Grid2D::new([3, 2].into(), vec![1, 2, 3, 4, 5, 6], no_data_value)
+                    Grid2D::new([3, 2].into(), vec![1, 2, 3, 4, 5, 6])
                         .unwrap()
                         .into(),
                 )],
@@ -252,7 +263,8 @@ mod tests {
                     data_type: RasterDataType::U8,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     measurement: Measurement::Unitless,
-                    no_data_value: no_data_value.map(AsPrimitive::as_),
+                    time: None,
+                    bbox: None,
                 },
             },
         }
@@ -263,7 +275,7 @@ mod tests {
             sources: vec![raster_source].into(),
         };
 
-        let execution_context = MockExecutionContext::test_default();
+        let execution_context = MockExecutionContext::new_with_tiling_spec(tiling_specification);
 
         let statistics = statistics
             .boxed()
@@ -290,7 +302,7 @@ mod tests {
             result.to_string(),
             json!([{
                 "pixelCount": 6,
-                "nanCount": 0,
+                "nanCount": 64_794, // (360*180)-6
                 "min": 1.0,
                 "max": 6.0,
                 "mean": 3.5,

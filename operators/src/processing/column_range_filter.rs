@@ -132,8 +132,18 @@ where
                         .cloned()
                         .map(|range| range.into_int_range().map(Into::into))
                         .collect(),
+                    FeatureDataType::Bool => ranges
+                        .iter()
+                        .cloned()
+                        .map(|range| range.into_int_range().map(Into::into))
+                        .collect(),
+                    FeatureDataType::DateTime => ranges
+                        .iter()
+                        .cloned()
+                        .map(|range| range.into_int_range().map(Into::into))
+                        .collect(),
                     FeatureDataType::Category => Err(error::Error::InvalidType {
-                        expected: "text, float, or int".to_string(),
+                        expected: "text, float, int, bool or datetime".to_string(),
                         found: "category".to_string(),
                     }),
                 };
@@ -175,7 +185,7 @@ mod tests {
         }
         .boxed();
 
-        let serialized = serde_json::to_string(&filter).unwrap();
+        let serialized = serde_json::to_value(&filter).unwrap();
 
         assert_eq!(
             serialized,
@@ -192,15 +202,16 @@ mod tests {
                     "vector": {
                         "type": "MockFeatureCollectionSourceMultiPoint",
                         "params": {
-                            "collections": []
+                            "collections": [],
+                            "spatialReference": "EPSG:4326",
+                            "measurements": null,
                         }
                     }
                 },
             })
-            .to_string()
         );
 
-        let _operator: Box<dyn VectorOperator> = serde_json::from_str(&serialized).unwrap();
+        let _operator: Box<dyn VectorOperator> = serde_json::from_value(serialized).unwrap();
     }
 
     #[tokio::test]

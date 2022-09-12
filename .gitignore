@@ -16,4 +16,3 @@ test_upload/
 services/test_upload/
 **/*.gpkg-shm
 **/*.gpkg-wal
-test_data/.DS_Store

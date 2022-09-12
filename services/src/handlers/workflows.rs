@@ -1,23 +1,25 @@
 use std::collections::HashSet;
+use std::io::{Cursor, Write};
 
-use crate::datasets::listing::DatasetProvider;
+use crate::datasets::listing::{DatasetProvider, ProvenanceOutput};
 use crate::datasets::storage::{AddDataset, DatasetDefinition, DatasetStore, MetaDataDefinition};
 use crate::datasets::upload::{UploadId, UploadRootPath};
-use crate::error;
 use crate::error::Result;
 use crate::handlers::Context;
+use crate::layers::storage::LayerProviderDb;
 use crate::util::config::get_config_element;
 use crate::util::user_input::UserInput;
 use crate::util::IdResponse;
 use crate::workflows::registry::WorkflowRegistry;
 use crate::workflows::workflow::{Workflow, WorkflowId};
-use actix_web::{web, FromRequest, Responder};
+use actix_web::{web, FromRequest, HttpResponse, Responder};
 use futures::future::join_all;
-use geoengine_datatypes::dataset::{DatasetId, InternalDatasetId};
+use geoengine_datatypes::dataset::{DataId, DatasetId};
+use geoengine_datatypes::error::{BoxedResultExt, ErrorSource};
 use geoengine_datatypes::primitives::{AxisAlignedRectangle, RasterQueryRectangle};
 use geoengine_datatypes::spatial_reference::SpatialReference;
 use geoengine_datatypes::util::Identifier;
-use geoengine_operators::engine::{OperatorDatasets, TypedOperator, TypedResultDescriptor};
+use geoengine_operators::engine::{OperatorData, TypedOperator, TypedResultDescriptor};
 use geoengine_operators::source::{
     FileNotFoundHandling, GdalDatasetGeoTransform, GdalDatasetParameters, GdalMetaDataStatic,
 };
@@ -26,8 +28,9 @@ use geoengine_operators::util::raster_stream_to_geotiff::{
 };
 use geoengine_operators::{call_on_generic_raster_processor_gdal_types, call_on_typed_operator};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, Snafu};
 use tokio::fs;
+use zip::{write::FileOptions, ZipWriter};
 
 pub(crate) fn init_workflow_routes<C>(cfg: &mut web::ServiceConfig)
 where
@@ -35,16 +38,24 @@ where
     C::Session: FromRequest,
 {
     cfg.service(
+        // TODO: rename to plural `workflows`
         web::scope("/workflow")
             .service(web::resource("").route(web::post().to(register_workflow_handler::<C>)))
-            .service(web::resource("/{id}").route(web::get().to(load_workflow_handler::<C>)))
             .service(
-                web::resource("/{id}/metadata")
-                    .route(web::get().to(get_workflow_metadata_handler::<C>)),
-            )
-            .service(
-                web::resource("/{id}/provenance")
-                    .route(web::get().to(get_workflow_provenance_handler::<C>)),
+                web::scope("/{id}")
+                    .service(web::resource("").route(web::get().to(load_workflow_handler::<C>)))
+                    .service(
+                        web::resource("/metadata")
+                            .route(web::get().to(get_workflow_metadata_handler::<C>)),
+                    )
+                    .service(
+                        web::resource("/provenance")
+                            .route(web::get().to(get_workflow_provenance_handler::<C>)),
+                    )
+                    .service(
+                        web::resource("/allMetadata/zip")
+                            .route(web::get().to(get_workflow_all_metadata_zip_handler::<C>)),
+                    ),
             ),
     )
     .service(
@@ -93,25 +104,21 @@ async fn register_workflow_handler<C: Context>(
         TypedOperator::Vector(o) => {
             o.initialize(&execution_context)
                 .await
-                .context(error::Operator)?;
+                .context(crate::error::Operator)?;
         }
         TypedOperator::Raster(o) => {
             o.initialize(&execution_context)
                 .await
-                .context(error::Operator)?;
+                .context(crate::error::Operator)?;
         }
         TypedOperator::Plot(o) => {
             o.initialize(&execution_context)
                 .await
-                .context(error::Operator)?;
+                .context(crate::error::Operator)?;
         }
     }
 
-    let id = ctx
-        .workflow_registry_ref_mut()
-        .await
-        .register(workflow)
-        .await?;
+    let id = ctx.workflow_registry_ref().register(workflow).await?;
     Ok(web::Json(IdResponse::from(id)))
 }
 
@@ -149,11 +156,7 @@ async fn load_workflow_handler<C: Context>(
     _session: C::Session,
     ctx: web::Data<C>,
 ) -> Result<impl Responder> {
-    let wf = ctx
-        .workflow_registry_ref()
-        .await
-        .load(&id.into_inner())
-        .await?;
+    let wf = ctx.workflow_registry_ref().load(&id.into_inner()).await?;
     Ok(web::Json(wf))
 }
 
@@ -178,28 +181,33 @@ async fn get_workflow_metadata_handler<C: Context>(
     session: C::Session,
     ctx: web::Data<C>,
 ) -> Result<impl Responder> {
-    let workflow = ctx
-        .workflow_registry_ref()
-        .await
-        .load(&id.into_inner())
-        .await?;
+    let workflow = ctx.workflow_registry_ref().load(&id.into_inner()).await?;
 
     let execution_context = ctx.execution_context(session)?;
 
+    let result_descriptor = workflow_metadata::<C>(workflow, execution_context).await?;
+
+    Ok(web::Json(result_descriptor))
+}
+
+async fn workflow_metadata<C: Context>(
+    workflow: Workflow,
+    execution_context: C::ExecutionContext,
+) -> Result<TypedResultDescriptor> {
     // TODO: use cache here
     let result_descriptor: TypedResultDescriptor = call_on_typed_operator!(
         workflow.operator,
         operator => {
             let operator = operator
                 .initialize(&execution_context).await
-                .context(error::Operator)?;
+                .context(crate::error::Operator)?;
 
             #[allow(clippy::clone_on_copy)]
             operator.result_descriptor().clone().into()
         }
     );
 
-    Ok(web::Json(result_descriptor))
+    Ok(result_descriptor)
 }
 
 /// Gets the provenance of all datasets used in a workflow.
@@ -235,19 +243,26 @@ async fn get_workflow_provenance_handler<C: Context>(
     session: C::Session,
     ctx: web::Data<C>,
 ) -> Result<impl Responder> {
-    let workflow = ctx
-        .workflow_registry_ref()
-        .await
-        .load(&id.into_inner())
-        .await?;
+    let workflow = ctx.workflow_registry_ref().load(&id.into_inner()).await?;
 
-    let datasets = workflow.operator.datasets();
+    let provenance = workflow_provenance(&workflow, ctx.get_ref(), session).await?;
 
-    let db = ctx.dataset_db_ref().await;
+    Ok(web::Json(provenance))
+}
+
+async fn workflow_provenance<C: Context>(
+    workflow: &Workflow,
+    ctx: &C,
+    session: C::Session,
+) -> Result<Vec<ProvenanceOutput>> {
+    let datasets = workflow.operator.data_ids();
+
+    let db = ctx.dataset_db_ref();
+    let providers = ctx.layer_provider_db_ref();
 
     let provenance: Vec<_> = datasets
         .iter()
-        .map(|id| db.provenance(&session, id))
+        .map(|id| resolve_provenance::<C>(&session, db, providers, id))
         .collect();
     let provenance: Result<Vec<_>> = join_all(provenance).await.into_iter().collect();
 
@@ -255,7 +270,113 @@ async fn get_workflow_provenance_handler<C: Context>(
     let provenance: HashSet<_> = provenance?.into_iter().collect();
     let provenance: Vec<_> = provenance.into_iter().collect();
 
-    Ok(web::Json(provenance))
+    Ok(provenance)
+}
+
+/// Gets a ZIP archive of the worklow, its provenance and the output metadata.
+///
+/// # Example
+///
+/// ```text
+/// GET /workflow/cee25e8c-18a0-5f1b-a504-0bc30de21e06/all_metadata/zip
+/// Authorization: Bearer e9da345c-b1df-464b-901c-0335a0419227
+/// ```
+/// Response:
+/// <zip archive>
+/// ```
+async fn get_workflow_all_metadata_zip_handler<C: Context>(
+    id: web::Path<WorkflowId>,
+    session: C::Session,
+    ctx: web::Data<C>,
+) -> Result<impl Responder> {
+    let id = id.into_inner();
+
+    let workflow = ctx.workflow_registry_ref().load(&id).await?;
+
+    let (metadata, provenance) = futures::try_join!(
+        workflow_metadata::<C>(workflow.clone(), ctx.execution_context(session.clone())?),
+        workflow_provenance(&workflow, ctx.get_ref(), session),
+    )?;
+
+    let output = crate::util::spawn_blocking(move || {
+        let mut output = Vec::new();
+
+        let zip_options =
+            FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let mut zip_writer = ZipWriter::new(Cursor::new(&mut output));
+
+        let workflow_filename = "workflow.json";
+        zip_writer
+            .start_file(workflow_filename, zip_options)
+            .boxed_context(error::CannotAddDataToZipFile {
+                item: workflow_filename,
+            })?;
+        zip_writer
+            .write_all(serde_json::to_string_pretty(&workflow)?.as_bytes())
+            .boxed_context(error::CannotAddDataToZipFile {
+                item: workflow_filename,
+            })?;
+
+        let metadata_filename = "metadata.json";
+        zip_writer
+            .start_file(metadata_filename, zip_options)
+            .boxed_context(error::CannotAddDataToZipFile {
+                item: metadata_filename,
+            })?;
+        zip_writer
+            .write_all(serde_json::to_string_pretty(&metadata)?.as_bytes())
+            .boxed_context(error::CannotAddDataToZipFile {
+                item: metadata_filename,
+            })?;
+
+        let citation_filename = "citation.json";
+        zip_writer
+            .start_file(citation_filename, zip_options)
+            .boxed_context(error::CannotAddDataToZipFile {
+                item: citation_filename,
+            })?;
+        zip_writer
+            .write_all(serde_json::to_string_pretty(&provenance)?.as_bytes())
+            .boxed_context(error::CannotAddDataToZipFile {
+                item: citation_filename,
+            })?;
+
+        zip_writer
+            .finish()
+            .boxed_context(error::CannotFinishZipFile)?;
+        drop(zip_writer);
+
+        Result::<Vec<u8>>::Ok(output)
+    })
+    .await??;
+
+    let response = HttpResponse::Ok()
+        .content_type("application/zip")
+        .insert_header((
+            "content-disposition",
+            format!("attachment; filename=\"metadata_{id}.zip\""),
+        ))
+        .body(web::Bytes::from(output));
+
+    Ok(response)
+}
+
+async fn resolve_provenance<C: Context>(
+    session: &C::Session,
+    datasets: &C::DatasetDB,
+    providers: &C::LayerProviderDB,
+    id: &DataId,
+) -> Result<ProvenanceOutput> {
+    match id {
+        DataId::Internal { dataset_id } => datasets.provenance(session, dataset_id).await,
+        DataId::External(e) => {
+            providers
+                .layer_provider(e.provider_id)
+                .await?
+                .provenance(id)
+                .await
+        }
+    }
 }
 
 /// parameter for the dataset from workflow handler (body)
@@ -319,7 +440,7 @@ struct RasterDatasetFromWorkflowResult {
 /// ```text
 /// {
 ///   "upload": "3086f494-d5a4-4b51-a14b-3b29f8bf7bb0",
-///   "dataset": {
+///   "data": {
 ///     "type": "internal",
 ///     "datasetId": "94230f0b-4e8a-4cba-9adc-3ace837fe5d4"
 ///   }
@@ -333,51 +454,58 @@ async fn dataset_from_workflow_handler<C: Context>(
 ) -> Result<impl Responder> {
     // TODO: support datasets with multiple time steps
 
-    let workflow = ctx.workflow_registry_ref().await.load(&workflow_id).await?;
+    let workflow = ctx.workflow_registry_ref().load(&workflow_id).await?;
 
-    let operator = workflow.operator.get_raster().context(error::Operator)?;
+    let operator = workflow
+        .operator
+        .get_raster()
+        .context(crate::error::Operator)?;
 
     let execution_context = ctx.execution_context(session.clone())?;
     let initialized = operator
         .clone()
         .initialize(&execution_context)
         .await
-        .context(error::Operator)?;
+        .context(crate::error::Operator)?;
 
     let result_descriptor = initialized.result_descriptor();
 
-    let processor = initialized.query_processor().context(error::Operator)?;
+    let processor = initialized
+        .query_processor()
+        .context(crate::error::Operator)?;
 
     // put the created data into a new upload
     let upload = UploadId::new();
     let upload_path = upload.root_path()?;
-    fs::create_dir_all(&upload_path).await.context(error::Io)?;
+    fs::create_dir_all(&upload_path)
+        .await
+        .context(crate::error::Io)?;
     let file_path = upload_path.join("raster.tiff");
 
     let query_rect = info.query;
     let query_ctx = ctx.query_context()?;
-    let no_data_value = result_descriptor.no_data_value;
     let request_spatial_ref = Option::<SpatialReference>::from(result_descriptor.spatial_reference)
-        .ok_or(error::Error::MissingSpatialReference)?;
+        .ok_or(crate::error::Error::MissingSpatialReference)?;
     let tile_limit = None; // TODO: set a reasonable limit or make configurable?
 
     // build the geotiff
-    call_on_generic_raster_processor_gdal_types!(processor, p =>  raster_stream_to_geotiff(
+    call_on_generic_raster_processor_gdal_types!(processor, p => raster_stream_to_geotiff(
             &file_path,
             p,
             query_rect,
             query_ctx,
             GdalGeoTiffDatasetMetadata {
-                no_data_value,
+                no_data_value: Default::default(), // TODO: decide how to handle the no data here
                 spatial_reference: request_spatial_ref,
             },
             GdalGeoTiffOptions {
                 compression_num_threads: get_config_element::<crate::util::config::Gdal>()?.compression_num_threads,
                 as_cog: info.as_cog,
+                force_big_tiff: false,
             },
             tile_limit,
         ).await)?
-    .map_err(error::Error::from)?;
+    .map_err(crate::error::Error::from)?;
 
     // create the dataset
     let dataset = create_dataset(
@@ -402,7 +530,7 @@ async fn create_dataset<C: Context>(
     ctx: &C,
     session: <C as Context>::Session,
 ) -> Result<geoengine_datatypes::dataset::DatasetId> {
-    let dataset_id = InternalDatasetId::new().into();
+    let dataset_id = DatasetId::new();
     let dataset_definition = DatasetDefinition {
         properties: AddDataset {
             id: Some(dataset_id),
@@ -427,10 +555,11 @@ async fn create_dataset<C: Context>(
                 height: (info.query.spatial_bounds.size_y() / info.query.spatial_resolution.y)
                     .ceil() as usize,
                 file_not_found_handling: FileNotFoundHandling::Error,
-                no_data_value: result_descriptor.no_data_value,
+                no_data_value: None, // `None` will let the GdalSource detect the correct no-data value.
                 properties_mapping: None, // TODO: add properties
                 gdal_open_options: None,
                 gdal_config_options: None,
+                allow_alphaband_as_mask: true,
             },
             result_descriptor: result_descriptor.clone(),
         }),
@@ -438,7 +567,7 @@ async fn create_dataset<C: Context>(
 
     // TODO: build pyramides, prefereably in the background
 
-    let mut db = ctx.dataset_db_ref_mut().await;
+    let db = ctx.dataset_db_ref();
     let meta = db.wrap_meta_data(dataset_definition.meta_data);
     let dataset = db
         .add_dataset(&session, dataset_definition.properties.validated()?, meta)
@@ -446,8 +575,22 @@ async fn create_dataset<C: Context>(
     Ok(dataset)
 }
 
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+#[snafu(module(error), context(suffix(false)))] // disables default `Snafu` suffix
+pub enum WorkflowApiError {
+    #[snafu(display("Adding data to output ZIP file failed"))]
+    CannotAddDataToZipFile {
+        item: &'static str,
+        source: Box<dyn ErrorSource>,
+    },
+    #[snafu(display("Finishing to output ZIP file failed"))]
+    CannotFinishZipFile { source: Box<dyn ErrorSource> },
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::contexts::{InMemoryContext, Session, SimpleContext};
     use crate::handlers::ErrorResponse;
@@ -462,7 +605,8 @@ mod tests {
     use actix_web_httpauth::headers::authorization::Bearer;
     use geoengine_datatypes::collections::MultiPointCollection;
     use geoengine_datatypes::primitives::{
-        FeatureData, Measurement, MultiPoint, SpatialPartition2D, SpatialResolution, TimeInterval,
+        ContinuousMeasurement, FeatureData, Measurement, MultiPoint, SpatialPartition2D,
+        SpatialResolution, TimeInterval,
     };
     use geoengine_datatypes::raster::{GridShape, RasterDataType, TilingSpecification};
     use geoengine_datatypes::spatial_reference::SpatialReference;
@@ -477,6 +621,9 @@ mod tests {
     use geoengine_operators::source::{GdalSource, GdalSourceParameters};
     use geoengine_operators::util::raster_stream_to_geotiff::raster_stream_to_geotiff_bytes;
     use serde_json::json;
+    use std::io::Read;
+    use zip::read::ZipFile;
+    use zip::ZipArchive;
 
     async fn register_test_helper(method: Method) -> ServiceResponse {
         let ctx = InMemoryContext::test_default();
@@ -685,9 +832,7 @@ mod tests {
         };
 
         let id = ctx
-            .workflow_registry()
-            .write()
-            .await
+            .workflow_registry_ref()
             .register(workflow.clone())
             .await
             .unwrap();
@@ -714,9 +859,21 @@ mod tests {
                 "dataType": "MultiPoint",
                 "spatialReference": "EPSG:4326",
                 "columns": {
-                    "bar": "int",
-                    "foo": "float"
-                }
+                    "bar": {
+                        "dataType": "int",
+                        "measurement": {
+                            "type": "unitless"
+                        }
+                    },
+                    "foo": {
+                        "dataType": "float",
+                        "measurement": {
+                            "type": "unitless"
+                        }
+                    }
+                },
+                "time": null,
+                "bbox": null
             })
         );
     }
@@ -734,11 +891,12 @@ mod tests {
                     result_descriptor: RasterResultDescriptor {
                         data_type: RasterDataType::U8,
                         spatial_reference: SpatialReference::epsg_4326().into(),
-                        measurement: Measurement::Continuous {
+                        measurement: Measurement::Continuous(ContinuousMeasurement {
                             measurement: "radiation".to_string(),
                             unit: None,
-                        },
-                        no_data_value: None,
+                        }),
+                        time: None,
+                        bbox: None,
                     },
                 },
             }
@@ -747,9 +905,7 @@ mod tests {
         };
 
         let id = ctx
-            .workflow_registry()
-            .write()
-            .await
+            .workflow_registry_ref()
             .register(workflow.clone())
             .await
             .unwrap();
@@ -774,7 +930,8 @@ mod tests {
                     "measurement": "radiation",
                     "unit": null
                 },
-                "noDataValue": null
+                "time": null,
+                "bbox": null
             })
         );
     }
@@ -808,9 +965,7 @@ mod tests {
         };
 
         let id = ctx
-            .workflow_registry()
-            .write()
-            .await
+            .workflow_registry_ref()
             .register(workflow.clone())
             .await
             .unwrap();
@@ -843,9 +998,7 @@ mod tests {
         };
 
         let id = ctx
-            .workflow_registry()
-            .write()
-            .await
+            .workflow_registry_ref()
             .register(workflow.clone())
             .await
             .unwrap();
@@ -863,7 +1016,9 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&res_body).unwrap(),
             serde_json::json!({
                 "type": "plot",
-                "spatialReference": ""
+                "spatialReference": "",
+                "time": null,
+                "bbox": null
             })
         );
     }
@@ -880,7 +1035,7 @@ mod tests {
             operator: TypedOperator::Raster(
                 GdalSource {
                     params: GdalSourceParameters {
-                        dataset: dataset.clone(),
+                        data: dataset.into(),
                     },
                 }
                 .boxed(),
@@ -888,9 +1043,7 @@ mod tests {
         };
 
         let id = ctx
-            .workflow_registry()
-            .write()
-            .await
+            .workflow_registry_ref()
             .register(workflow.clone())
             .await
             .unwrap();
@@ -907,9 +1060,9 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&res_body).unwrap(),
             serde_json::json!([{
-                "dataset": {
+                "data": {
                     "type": "internal",
-                    "datasetId": dataset.internal().unwrap().to_string()
+                    "datasetId": dataset.to_string()
                 },
                 "provenance": {
                     "citation": "Sample Citation",
@@ -942,7 +1095,7 @@ mod tests {
             operator: TypedOperator::Raster(
                 GdalSource {
                     params: GdalSourceParameters {
-                        dataset: dataset.clone(),
+                        data: dataset.into(),
                     },
                 }
                 .boxed(),
@@ -950,8 +1103,7 @@ mod tests {
         };
 
         let workflow_id = ctx
-            .workflow_registry_ref_mut()
-            .await
+            .workflow_registry_ref()
             .register(workflow)
             .await
             .unwrap();
@@ -1000,7 +1152,7 @@ mod tests {
         // query the newly created dataset
         let op = GdalSource {
             params: GdalSourceParameters {
-                dataset: response.dataset.clone(),
+                data: response.dataset.into(),
             },
         }
         .boxed();
@@ -1032,6 +1184,7 @@ mod tests {
                     .unwrap()
                     .compression_num_threads,
                 as_cog: false,
+                force_big_tiff: false,
             },
             None,
         )
@@ -1061,7 +1214,7 @@ mod tests {
               "source": {
                 "type": "GdalSource",
                 "params": {
-                  "dataset": {
+                  "data": {
                     "type": "internal",
                     "datasetId": "36574dc3-560a-4b09-9d22-d5945f2b8093"
                   }
@@ -1084,6 +1237,120 @@ mod tests {
         assert_eq!(
             res_body,
             json!({"error": "Operator", "message": "Operator: Invalid operator type: expected Vector found Raster"}).to_string()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn test_download_all_metadata_zip() {
+        fn zip_file_to_json(mut zip_file: ZipFile) -> serde_json::Value {
+            let mut bytes = Vec::new();
+            zip_file.read_to_end(&mut bytes).unwrap();
+
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let exe_ctx_tiling_spec = TilingSpecification {
+            origin_coordinate: (0., 0.).into(),
+            tile_size_in_pixels: GridShape::new([600, 600]),
+        };
+
+        // override the pixel size since this test was designed for 600 x 600 pixel tiles
+        let ctx = InMemoryContext::new_with_context_spec(
+            exe_ctx_tiling_spec,
+            TestDefault::test_default(),
+        );
+
+        let session_id = ctx.default_session_ref().await.id();
+
+        let dataset = add_ndvi_to_datasets(&ctx).await;
+
+        let workflow = Workflow {
+            operator: TypedOperator::Raster(
+                GdalSource {
+                    params: GdalSourceParameters {
+                        data: dataset.into(),
+                    },
+                }
+                .boxed(),
+            ),
+        };
+
+        let workflow_id = ctx
+            .workflow_registry_ref()
+            .register(workflow)
+            .await
+            .unwrap();
+
+        // create dataset from workflow
+        let req = test::TestRequest::get()
+            .uri(&format!("/workflow/{workflow_id}/allMetadata/zip"))
+            .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())));
+        let res = send_test_request(req, ctx.clone()).await;
+
+        assert_eq!(res.status(), 200);
+
+        let zip_bytes = test::read_body(res).await;
+
+        let mut zip = ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+
+        assert_eq!(zip.len(), 3);
+
+        assert_eq!(
+            zip_file_to_json(zip.by_name("workflow.json").unwrap()),
+            serde_json::json!({
+                "type": "Raster",
+                "operator": {
+                    "type": "GdalSource",
+                    "params": {
+                        "data": {
+                            "type": "internal",
+                            "datasetId": dataset
+                        }
+                    }
+                }
+            })
+        );
+
+        assert_eq!(
+            zip_file_to_json(zip.by_name("metadata.json").unwrap()),
+            serde_json::json!({
+                "type": "raster",
+                "dataType": "U8",
+                "spatialReference": "EPSG:4326",
+                "measurement": {
+                    "type": "unitless"
+                },
+                "time": {
+                    "start": 1_388_534_400_000_i64,
+                    "end": 1_404_172_800_000_i64,
+                },
+                "bbox": {
+                    "upperLeftCoordinate": {
+                        "x": -180.0,
+                        "y": 90.0,
+                    },
+                    "lowerRightCoordinate": {
+                        "x": 180.0,
+                        "y": -90.0
+                    }
+                }
+            })
+        );
+
+        assert_eq!(
+            zip_file_to_json(zip.by_name("citation.json").unwrap()),
+            serde_json::json!([{
+                "data": {
+                    "type": "internal",
+                    "datasetId": dataset
+                },
+                "provenance": {
+                    "citation": "Sample Citation",
+                    "license": "Sample License",
+                    "uri": "http://example.org/"
+                }
+            }])
         );
     }
 }

@@ -12,10 +12,14 @@ use std::str::FromStr;
 pub mod datasets;
 #[cfg(feature = "ebv")]
 pub mod ebv;
+#[cfg(feature = "nfdi")]
+pub mod gfbio;
+pub mod layers;
 pub mod plots;
 pub mod projects;
 pub mod session;
 pub mod spatial_references;
+pub mod tasks;
 pub mod upload;
 pub mod wcs;
 pub mod wfs;
@@ -59,8 +63,8 @@ impl actix_web::ResponseError for ErrorResponse {
 }
 
 impl fmt::Display for ErrorResponse {
-    fn fmt(&self, _f: &mut fmt::Formatter) -> fmt::Result {
-        unimplemented!("required by ResponseError")
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", self.error, self.message)
     }
 }
 
@@ -75,6 +79,6 @@ pub fn get_token(req: &HttpRequest) -> Result<SessionId> {
         source: Box::new(Error::InvalidAuthorizationScheme),
     })?;
     SessionId::from_str(scheme.token()).map_err(|err| Error::Authorization {
-        source: Box::new(err),
+        source: Box::new(Error::InvalidUuid { source: err }),
     })
 }

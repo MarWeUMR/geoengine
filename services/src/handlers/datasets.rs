@@ -4,10 +4,11 @@ use std::{
     path::Path,
 };
 
-use crate::datasets::listing::DatasetProvider;
-use crate::datasets::storage::{AddDataset, DatasetStore, MetaDataSuggestion, SuggestMetaData};
-use crate::datasets::storage::{DatasetProviderDb, DatasetProviderListOptions};
 use crate::datasets::upload::UploadRootPath;
+use crate::datasets::{
+    listing::DatasetProvider,
+    storage::{AddDataset, DatasetStore, MetaDataSuggestion, SuggestMetaData},
+};
 use crate::datasets::{
     storage::{CreateDataset, MetaDataDefinition},
     upload::Upload,
@@ -21,16 +22,19 @@ use crate::{
     util::IdResponse,
 };
 use actix_web::{web, FromRequest, Responder};
-use gdal::{vector::Layer, Dataset};
 use gdal::{vector::OGRFieldType, DatasetOptions};
+use gdal::{
+    vector::{Layer, LayerAccess},
+    Dataset,
+};
 use geoengine_datatypes::{
     collections::VectorDataType,
-    dataset::{DatasetProviderId, InternalDatasetId},
-    primitives::{FeatureDataType, VectorQueryRectangle},
+    dataset::DatasetId,
+    primitives::{FeatureDataType, Measurement, VectorQueryRectangle},
     spatial_reference::{SpatialReference, SpatialReferenceOption},
 };
 use geoengine_operators::{
-    engine::{StaticMetaData, VectorResultDescriptor},
+    engine::{StaticMetaData, VectorColumnInfo, VectorResultDescriptor},
     source::{
         OgrSourceColumnSpec, OgrSourceDataset, OgrSourceDatasetTimeType, OgrSourceDurationSpec,
         OgrSourceTimeFormat,
@@ -46,51 +50,12 @@ where
 {
     cfg.service(
         web::scope("/dataset")
-            .service(web::resource("").route(web::post().to(create_dataset_handler::<C>)))
+            .service(web::resource("/suggest").route(web::get().to(suggest_meta_data_handler::<C>)))
             .service(web::resource("/auto").route(web::post().to(auto_create_dataset_handler::<C>)))
-            .service(
-                web::resource("/internal/{dataset}").route(web::get().to(get_dataset_handler::<C>)),
-            )
-            .service(
-                web::resource("/suggest").route(web::get().to(suggest_meta_data_handler::<C>)),
-            ),
+            .service(web::resource("/{dataset}").route(web::get().to(get_dataset_handler::<C>)))
+            .service(web::resource("").route(web::post().to(create_dataset_handler::<C>))), // must come last to not match other routes
     )
-    .service(web::resource("/providers").route(web::get().to(list_providers_handler::<C>)))
-    .service(web::resource("/datasets").route(web::get().to(list_datasets_handler::<C>)))
-    .service(
-        web::resource("/datasets/external/{provider}")
-            .route(web::get().to(list_external_datasets_handler::<C>)),
-    );
-}
-
-async fn list_providers_handler<C: Context>(
-    session: C::Session,
-    ctx: web::Data<C>,
-    options: web::Query<DatasetProviderListOptions>,
-) -> Result<impl Responder> {
-    let list = ctx
-        .dataset_db_ref()
-        .await
-        .list_dataset_providers(&session, options.into_inner().validated()?)
-        .await?;
-    Ok(web::Json(list))
-}
-
-async fn list_external_datasets_handler<C: Context>(
-    provider: web::Path<DatasetProviderId>,
-    session: C::Session,
-    ctx: web::Data<C>,
-    options: web::Query<DatasetListOptions>,
-) -> Result<impl Responder> {
-    let options = options.into_inner().validated()?;
-    let list = ctx
-        .dataset_db_ref()
-        .await
-        .dataset_provider(&session, provider.into_inner())
-        .await?
-        .list(options) // TODO: authorization
-        .await?;
-    Ok(web::Json(list))
+    .service(web::resource("/datasets").route(web::get().to(list_datasets_handler::<C>)));
 }
 
 /// Lists available [Datasets](crate::datasets::listing::DatasetListing).
@@ -128,7 +93,7 @@ async fn list_datasets_handler<C: Context>(
     options: web::Query<DatasetListOptions>,
 ) -> Result<impl Responder> {
     let options = options.into_inner().validated()?;
-    let list = ctx.dataset_db_ref().await.list(&session, options).await?;
+    let list = ctx.dataset_db_ref().list(&session, options).await?;
     Ok(web::Json(list))
 }
 
@@ -159,14 +124,13 @@ async fn list_datasets_handler<C: Context>(
 /// }
 /// ```
 async fn get_dataset_handler<C: Context>(
-    dataset: web::Path<InternalDatasetId>,
+    dataset: web::Path<DatasetId>,
     session: C::Session,
     ctx: web::Data<C>,
 ) -> Result<impl Responder> {
     let dataset = ctx
         .dataset_db_ref()
-        .await
-        .load(&session, &dataset.into_inner().into())
+        .load(&session, &dataset.into_inner())
         .await?;
     Ok(web::Json(dataset))
 }
@@ -200,7 +164,9 @@ async fn get_dataset_handler<C: Context>(
 ///             "y": null,
 ///             "text": [],
 ///             "float": [],
-///             "int": []
+///             "int": [],
+///             "bool": [],
+///             "datetime": [],
 ///           },
 ///           "forceOgrTimeFilter": false,
 ///           "onError": "ignore"
@@ -230,7 +196,6 @@ async fn create_dataset_handler<C: Context>(
 ) -> Result<impl Responder> {
     let upload = ctx
         .dataset_db_ref()
-        .await
         .get_upload(&session, create.upload)
         .await?;
 
@@ -238,7 +203,7 @@ async fn create_dataset_handler<C: Context>(
 
     adjust_user_path_to_upload_path(&mut definition.meta_data, &upload)?;
 
-    let mut db = ctx.dataset_db_ref_mut().await;
+    let db = ctx.dataset_db_ref();
     let meta_data = db.wrap_meta_data(definition.meta_data);
     let id = db
         .add_dataset(&session, definition.properties.validated()?, meta_data)
@@ -261,6 +226,13 @@ fn adjust_user_path_to_upload_path(meta: &mut MetaDataDefinition, upload: &Uploa
         }
         crate::datasets::storage::MetaDataDefinition::GdalMetadataNetCdfCf(m) => {
             m.params.file_path = upload.adjust_file_path(&m.params.file_path)?;
+        }
+        crate::datasets::storage::MetaDataDefinition::GdalMetaDataList(m) => {
+            for p in &mut m.params {
+                if let Some(ref mut params) = p.params {
+                    params.file_path = upload.adjust_file_path(&params.file_path)?;
+                }
+            }
         }
     }
     Ok(())
@@ -297,7 +269,6 @@ async fn auto_create_dataset_handler<C: Context>(
 ) -> Result<impl Responder> {
     let upload = ctx
         .dataset_db_ref()
-        .await
         .get_upload(&session, create.upload)
         .await?;
 
@@ -315,7 +286,7 @@ async fn auto_create_dataset_handler<C: Context>(
         provenance: None,
     };
 
-    let mut db = ctx.dataset_db_ref_mut().await;
+    let db = ctx.dataset_db_ref();
     let meta_data = db.wrap_meta_data(meta_data);
     let id = db
         .add_dataset(&session, properties.validated()?, meta_data)
@@ -331,7 +302,6 @@ async fn suggest_meta_data_handler<C: Context>(
 ) -> Result<impl Responder> {
     let upload = ctx
         .dataset_db_ref()
-        .await
         .get_upload(&session, suggest.upload)
         .await?;
 
@@ -418,6 +388,8 @@ fn auto_detect_meta_data_definition(main_file_path: &Path) -> Result<MetaDataDef
                 int: columns_vecs.int,
                 float: columns_vecs.float,
                 text: columns_vecs.text,
+                bool: vec![],
+                datetime: columns_vecs.date,
                 rename: None,
             }),
             force_ogr_time_filter: false,
@@ -431,8 +403,22 @@ fn auto_detect_meta_data_definition(main_file_path: &Path) -> Result<MetaDataDef
             spatial_reference: geometry.spatial_reference,
             columns: columns_map
                 .into_iter()
-                .filter_map(|(k, v)| v.try_into().map(|v| (k, v)).ok()) // ignore all columns here that don't have a corresponding type in our collections
+                .filter_map(|(k, v)| {
+                    v.try_into()
+                        .map(|v| {
+                            (
+                                k,
+                                VectorColumnInfo {
+                                    data_type: v,
+                                    measurement: Measurement::Unitless,
+                                },
+                            )
+                        })
+                        .ok()
+                }) // ignore all columns here that don't have a corresponding type in our collections
                 .collect(),
+            time: None,
+            bbox: None,
         },
         phantom: Default::default(),
     }))
@@ -654,7 +640,8 @@ impl TryFrom<ColumnDataType> for FeatureDataType {
             ColumnDataType::Int => Ok(FeatureDataType::Int),
             ColumnDataType::Float => Ok(FeatureDataType::Float),
             ColumnDataType::Text => Ok(FeatureDataType::Text),
-            _ => Err(error::Error::NoFeatureDataTypeForColumnDataType),
+            ColumnDataType::Date => Ok(FeatureDataType::DateTime),
+            ColumnDataType::Unknown => Err(error::Error::NoFeatureDataTypeForColumnDataType),
         }
     }
 }
@@ -713,7 +700,7 @@ mod tests {
     use crate::projects::{PointSymbology, Symbology};
     use crate::test_data;
     use crate::util::tests::{
-        read_body_string, send_test_request, SetMultipartBody, TestDataUploads,
+        read_body_json, read_body_string, send_test_request, SetMultipartBody, TestDataUploads,
     };
     use actix_web;
     use actix_web::http::header;
@@ -722,7 +709,7 @@ mod tests {
     use geoengine_datatypes::collections::{
         GeometryCollection, MultiPointCollection, VectorDataType,
     };
-    use geoengine_datatypes::dataset::{DatasetId, InternalDatasetId};
+    use geoengine_datatypes::dataset::DatasetId;
     use geoengine_datatypes::primitives::{BoundingBox2D, SpatialResolution};
     use geoengine_datatypes::raster::{GridShape2D, TilingSpecification};
     use geoengine_datatypes::spatial_reference::SpatialReferenceOption;
@@ -734,7 +721,7 @@ mod tests {
     use geoengine_operators::source::{
         OgrSource, OgrSourceDataset, OgrSourceErrorSpec, OgrSourceParameters,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::str::FromStr;
 
     #[tokio::test]
@@ -748,12 +735,11 @@ mod tests {
             data_type: VectorDataType::MultiPoint,
             spatial_reference: SpatialReferenceOption::Unreferenced,
             columns: Default::default(),
+            time: None,
+            bbox: None,
         };
 
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::from_str("370e99ec-9fd8-401d-828d-d67b431a8742")
-                .unwrap(),
-        };
+        let id = DatasetId::from_str("370e99ec-9fd8-401d-828d-d67b431a8742")?;
         let ds = AddDataset {
             id: Some(id),
             name: "OgrDataset".to_string(),
@@ -782,15 +768,12 @@ mod tests {
         };
 
         let _id = ctx
-            .dataset_db_ref_mut()
-            .await
+            .dataset_db_ref()
             .add_dataset(&SimpleSession::default(), ds.validated()?, Box::new(meta))
             .await?;
 
-        let id2 = DatasetId::Internal {
-            dataset_id: InternalDatasetId::from_str("370e99ec-9fd8-401d-828d-d67b431a8742")
-                .unwrap(),
-        };
+        let id2 = DatasetId::from_str("370e99ec-9fd8-401d-828d-d67b431a8742")?;
+
         let ds = AddDataset {
             id: Some(id2),
             name: "OgrDataset2".to_string(),
@@ -819,8 +802,7 @@ mod tests {
         };
 
         let _id2 = ctx
-            .dataset_db_ref_mut()
-            .await
+            .dataset_db_ref()
             .add_dataset(&SimpleSession::default(), ds.validated()?, Box::new(meta))
             .await?;
 
@@ -841,12 +823,9 @@ mod tests {
         assert_eq!(res.status(), 200);
 
         assert_eq!(
-            read_body_string(res).await,
+            read_body_json(res).await,
             json!([{
-                "id": {
-                    "type": "internal",
-                    "datasetId": "370e99ec-9fd8-401d-828d-d67b431a8742"
-                },
+                "id": "370e99ec-9fd8-401d-828d-d67b431a8742",
                 "name": "OgrDataset2",
                 "description": "My Ogr dataset2",
                 "tags": [],
@@ -855,7 +834,9 @@ mod tests {
                     "type": "vector",
                     "dataType": "MultiPoint",
                     "spatialReference": "",
-                    "columns": {}
+                    "columns": {},
+                    "time": null,
+                    "bbox": null
                 },
                 "symbology": {
                     "type": "point",
@@ -880,10 +861,7 @@ mod tests {
                     "text": null
                 }
             }, {
-                "id": {
-                    "type": "internal",
-                    "datasetId": "370e99ec-9fd8-401d-828d-d67b431a8742"
-                },
+                "id": "370e99ec-9fd8-401d-828d-d67b431a8742",
                 "name": "OgrDataset",
                 "description": "My Ogr dataset",
                 "tags": [],
@@ -892,11 +870,12 @@ mod tests {
                     "type": "vector",
                     "dataType": "MultiPoint",
                     "spatialReference": "",
-                    "columns": {}
+                    "columns": {},
+                    "time": null,
+                    "bbox": null
                 },
                 "symbology": null
             }])
-            .to_string()
         );
 
         Ok(())
@@ -959,7 +938,9 @@ mod tests {
                             "y": null,
                             "float": ["natlscale"],
                             "int": ["scalerank"],
-                            "text": ["featurecla", "name", "website"]
+                            "text": ["featurecla", "name", "website"],
+                            "bool": [],
+                            "datetime": []
                         },
                         "forceOgrTimeGilter": false,
                         "onError": "ignore",
@@ -969,11 +950,36 @@ mod tests {
                         "dataType": "MultiPoint",
                         "spatialReference": "EPSG:4326",
                         "columns": {
-                            "website": "text",
-                            "name": "text",
-                            "natlscale": "float",
-                            "scalerank": "int",
-                            "featurecla": "text"
+                            "website": {
+                                "dataType": "text",
+                                "measurement": {
+                                    "type": "unitless"
+                                }
+                            },
+                            "name": {
+                                "dataType": "text",
+                                "measurement": {
+                                    "type": "unitless"
+                                }
+                            },
+                            "natlscale": {
+                                "dataType": "float",
+                                "measurement": {
+                                    "type": "unitless"
+                                }
+                            },
+                            "scalerank": {
+                                "dataType": "int",
+                                "measurement": {
+                                    "type": "unitless"
+                                }
+                            },
+                            "featurecla": {
+                                "dataType": "text",
+                                "measurement": {
+                                    "type": "unitless"
+                                }
+                            }
                         }
                     }
                 }
@@ -999,8 +1005,9 @@ mod tests {
     ) -> Result<Box<dyn InitializedVectorOperator>> {
         OgrSource {
             params: OgrSourceParameters {
-                dataset: dataset_id,
+                data: dataset_id.into(),
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -1106,6 +1113,8 @@ mod tests {
                             "name".to_string(),
                             "website".to_string(),
                         ],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1118,15 +1127,47 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: [
-                        ("name".to_string(), FeatureDataType::Text),
-                        ("scalerank".to_string(), FeatureDataType::Int),
-                        ("website".to_string(), FeatureDataType::Text),
-                        ("natlscale".to_string(), FeatureDataType::Float),
-                        ("featurecla".to_string(), FeatureDataType::Text),
+                        (
+                            "name".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "scalerank".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "website".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "natlscale".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Float,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "featurecla".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
                     ]
                     .iter()
                     .cloned()
                     .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             })
@@ -1141,7 +1182,7 @@ mod tests {
 
         if let MetaDataDefinition::OgrMetaData(meta_data) = &mut meta_data {
             if let Some(columns) = &mut meta_data.loading_info.columns {
-                columns.text.sort();
+                columns.datetime.sort();
             }
         }
 
@@ -1166,6 +1207,8 @@ mod tests {
                         float: vec![],
                         int: vec![],
                         text: vec![],
+                        bool: vec![],
+                        datetime: vec!["time_end".to_owned(), "time_start".to_owned()],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1177,7 +1220,27 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [].iter().cloned().collect(),
+                    columns: [
+                        (
+                            "time_start".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "time_end".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        )
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default()
             })
@@ -1192,7 +1255,7 @@ mod tests {
 
         if let MetaDataDefinition::OgrMetaData(meta_data) = &mut meta_data {
             if let Some(columns) = &mut meta_data.loading_info.columns {
-                columns.text.sort();
+                columns.datetime.sort();
             }
         }
 
@@ -1217,6 +1280,8 @@ mod tests {
                         float: vec![],
                         int: vec![],
                         text: vec![],
+                        bool: vec![],
+                        datetime: vec!["time_end".to_owned(), "time_start".to_owned()],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1228,7 +1293,27 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [].iter().cloned().collect(),
+                    columns: [
+                        (
+                            "time_start".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "time_end".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        )
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             })
@@ -1243,7 +1328,7 @@ mod tests {
 
         if let MetaDataDefinition::OgrMetaData(meta_data) = &mut meta_data {
             if let Some(columns) = &mut meta_data.loading_info.columns {
-                columns.text.sort();
+                columns.datetime.sort();
             }
         }
 
@@ -1268,6 +1353,8 @@ mod tests {
                         float: vec![],
                         int: vec![],
                         text: vec![],
+                        bool: vec![],
+                        datetime: vec!["time_end".to_owned(), "time_start".to_owned()],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1279,7 +1366,27 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [].iter().cloned().collect(),
+                    columns: [
+                        (
+                            "time_end".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "time_start".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        )
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             })
@@ -1288,16 +1395,10 @@ mod tests {
 
     #[test]
     fn it_detects_time_start_duration() {
-        let mut meta_data = auto_detect_meta_data_definition(test_data!(
+        let meta_data = auto_detect_meta_data_definition(test_data!(
             "vector/data/points_with_iso_start_duration.json"
         ))
         .unwrap();
-
-        if let MetaDataDefinition::OgrMetaData(meta_data) = &mut meta_data {
-            if let Some(columns) = &mut meta_data.loading_info.columns {
-                columns.text.sort();
-            }
-        }
 
         assert_eq!(
             meta_data,
@@ -1319,6 +1420,8 @@ mod tests {
                         float: vec![],
                         int: vec!["duration".to_owned()],
                         text: vec![],
+                        bool: vec![],
+                        datetime: vec!["time_start".to_owned()],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1330,10 +1433,27 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("duration".to_owned(), FeatureDataType::Int)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [
+                        (
+                            "time_start".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "duration".to_owned(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless
+                            }
+                        )
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default()
             })
@@ -1371,6 +1491,8 @@ mod tests {
                             "Longitude".to_string(),
                             "Name".to_string()
                         ],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1383,13 +1505,33 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReferenceOption::Unreferenced,
                     columns: [
-                        ("Latitude".to_string(), FeatureDataType::Text),
-                        ("Longitude".to_string(), FeatureDataType::Text),
-                        ("Name".to_string(), FeatureDataType::Text)
+                        (
+                            "Latitude".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "Longitude".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless
+                            }
+                        ),
+                        (
+                            "Name".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless
+                            }
+                        )
                     ]
                     .iter()
                     .cloned()
                     .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default()
             })
@@ -1406,6 +1548,8 @@ mod tests {
             data_type: VectorDataType::Data,
             spatial_reference: SpatialReferenceOption::Unreferenced,
             columns: Default::default(),
+            time: None,
+            bbox: None,
         };
 
         let ds = AddDataset {
@@ -1436,8 +1580,7 @@ mod tests {
         };
 
         let id = ctx
-            .dataset_db_ref_mut()
-            .await
+            .dataset_db_ref()
             .add_dataset(
                 &*ctx.default_session_ref().await,
                 ds.validated()?,
@@ -1446,7 +1589,102 @@ mod tests {
             .await?;
 
         let req = actix_web::test::TestRequest::get()
-            .uri(&format!("/dataset/internal/{}", id.internal().unwrap()))
+            .uri(&format!("/dataset/{}", id))
+            .append_header((header::CONTENT_LENGTH, 0))
+            .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())));
+        let res = send_test_request(req, ctx).await;
+
+        let res_status = res.status();
+        let res_body = serde_json::from_str::<Value>(&read_body_string(res).await).unwrap();
+        assert_eq!(res_status, 200, "{}", res_body);
+
+        assert_eq!(
+            res_body,
+            json!({
+                "id": id,
+                "name": "OgrDataset",
+                "description": "My Ogr dataset",
+                "resultDescriptor": {
+                    "type": "vector",
+                    "dataType": "Data",
+                    "spatialReference": "",
+                    "columns": {},
+                    "time": null,
+                    "bbox": null
+                },
+                "sourceOperator": "OgrSource",
+                "symbology": null,
+                "provenance": null,
+            })
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn it_suggests_metadata() -> Result<()> {
+        let mut test_data = TestDataUploads::default(); // remember created folder and remove them on drop
+
+        let ctx = InMemoryContext::test_default();
+        let session_id = ctx.default_session_ref().await.id();
+
+        let body = vec![(
+            "test.json",
+            r#"{
+                "type": "FeatureCollection",
+                "features": [
+                  {
+                    "type": "Feature",
+                    "geometry": {
+                      "type": "Point",
+                      "coordinates": [
+                        1,
+                        1
+                      ]
+                    },
+                    "properties": {
+                      "name": "foo",
+                      "id": 1
+                    }
+                  },
+                  {
+                    "type": "Feature",
+                    "geometry": {
+                      "type": "Point",
+                      "coordinates": [
+                        2,
+                        2
+                      ]
+                    },
+                    "properties": {
+                      "name": "bar",
+                      "id": 2
+                    }
+                  }
+                ]
+              }"#,
+        )];
+
+        let req = actix_web::test::TestRequest::post()
+            .uri("/upload")
+            .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())))
+            .set_multipart(body.clone());
+
+        let res = send_test_request(req, ctx.clone()).await;
+
+        assert_eq!(res.status(), 200);
+
+        let upload: IdResponse<UploadId> = actix_web::test::read_body_json(res).await;
+        test_data.uploads.push(upload.id);
+
+        let upload_content =
+            std::fs::read_to_string(upload.id.root_path().unwrap().join("test.json")).unwrap();
+
+        assert_eq!(&upload_content, body[0].1);
+
+        let req = actix_web::test::TestRequest::get()
+            .uri(&format!("/dataset/suggest?upload={}", upload.id))
             .append_header((header::CONTENT_LENGTH, 0))
             .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())));
         let res = send_test_request(req, ctx).await;
@@ -1456,25 +1694,62 @@ mod tests {
         assert_eq!(res_status, 200, "{}", res_body);
 
         assert_eq!(
-            res_body,
+            serde_json::from_str::<serde_json::Value>(&res_body).unwrap(),
             json!({
-                "id": {
-                    "type": "internal",
-                    "datasetId": id.internal().unwrap()
+              "mainFile": "test.json",
+              "metaData": {
+                "type": "OgrMetaData",
+                "loadingInfo": {
+                  "fileName": format!("test_upload/{}/test.json", upload.id),
+                  "layerName": "test",
+                  "dataType": "MultiPoint",
+                  "time": {
+                    "type": "none"
+                  },
+                  "defaultGeometry": null,
+                  "columns": {
+                    "formatSpecifics": null,
+                    "x": "",
+                    "y": null,
+                    "int": [
+                      "id"
+                    ],
+                    "float": [],
+                    "text": [
+                      "name"
+                    ],
+                    "bool": [],
+                    "datetime": [],
+                    "rename": null
+                  },
+                  "forceOgrTimeFilter": false,
+                  "forceOgrSpatialFilter": false,
+                  "onError": "ignore",
+                  "sqlQuery": null,
+                  "attributeQuery": null
                 },
-                "name": "OgrDataset",
-                "description": "My Ogr dataset",
                 "resultDescriptor": {
-                    "type": "vector",
-                    "dataType": "Data",
-                    "spatialReference": "",
-                    "columns": {}
-                },
-                "sourceOperator": "OgrSource",
-                "symbology": null,
-                "provenance": null,
+                  "dataType": "MultiPoint",
+                  "spatialReference": "EPSG:4326",
+                  "columns": {
+                    "id": {
+                      "dataType": "int",
+                      "measurement": {
+                        "type": "unitless"
+                      }
+                    },
+                    "name": {
+                      "dataType": "text",
+                      "measurement": {
+                        "type": "unitless"
+                      }
+                    }
+                  },
+                  "time": null,
+                  "bbox": null
+                }
+              }
             })
-            .to_string()
         );
 
         Ok(())

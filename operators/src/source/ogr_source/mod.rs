@@ -10,18 +10,16 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::task::Poll;
 
-use chrono::DateTime;
-use chrono::NaiveDate;
-use chrono::NaiveDateTime;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, FusedStream};
 use futures::task::Context;
 use futures::{ready, Stream, StreamExt};
 use futures::{Future, FutureExt};
 use gdal::vector::sql::ResultSet;
-use gdal::vector::{Feature, FieldValue, Layer, LayerCaps, OGRwkbGeometryType};
+use gdal::vector::{Feature, FieldValue, Layer, LayerAccess, LayerCaps, OGRwkbGeometryType};
 use log::debug;
 use pin_project::pin_project;
+use postgres_protocol::escape::{escape_identifier, escape_literal};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tokio::sync::Mutex;
@@ -32,14 +30,15 @@ use geoengine_datatypes::collections::{
     VectorDataType,
 };
 use geoengine_datatypes::primitives::{
-    AxisAlignedRectangle, BoundingBox2D, Coordinate2D, FeatureDataType, FeatureDataValue, Geometry,
-    MultiLineString, MultiPoint, MultiPolygon, NoGeometry, TimeInstance, TimeInterval, TimeStep,
-    TypedGeometry, VectorQueryRectangle,
+    AxisAlignedRectangle, BoundingBox2D, Coordinate2D, DateTime, DateTimeParseFormat,
+    FeatureDataType, FeatureDataValue, Geometry, MultiLineString, MultiPoint, MultiPolygon,
+    NoGeometry, TimeInstance, TimeInterval, TimeStep, TypedGeometry, VectorQueryRectangle,
 };
 use geoengine_datatypes::util::arrow::ArrowTyped;
 
-use crate::engine::{OperatorDatasets, QueryProcessor};
+use crate::engine::{OperatorData, OperatorName, QueryProcessor};
 use crate::error::Error;
+use crate::util::input::StringOrNumberRange;
 use crate::util::Result;
 use crate::{
     engine::{
@@ -50,7 +49,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use gdal::errors::GdalError;
-use geoengine_datatypes::dataset::DatasetId;
+use geoengine_datatypes::dataset::DataId;
 use std::convert::{TryFrom, TryInto};
 
 use self::dataset_iterator::OgrDatasetIterator;
@@ -58,17 +57,30 @@ use self::dataset_iterator::OgrDatasetIterator;
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OgrSourceParameters {
-    pub dataset: DatasetId,
+    pub data: DataId,
     pub attribute_projection: Option<Vec<String>>,
+    pub attribute_filters: Option<Vec<AttributeFilter>>,
 }
 
-impl OperatorDatasets for OgrSourceParameters {
-    fn datasets_collect(&self, datasets: &mut Vec<DatasetId>) {
-        datasets.push(self.dataset.clone());
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttributeFilter {
+    pub attribute: String,
+    pub ranges: Vec<StringOrNumberRange>,
+    pub keep_nulls: bool,
+}
+
+impl OperatorData for OgrSourceParameters {
+    fn data_ids_collect(&self, data_ids: &mut Vec<DataId>) {
+        data_ids.push(self.data.clone());
     }
 }
 
 pub type OgrSource = SourceOperator<OgrSourceParameters>;
+
+impl OperatorName for OgrSource {
+    const TYPE_NAME: &'static str = "OgrSource";
+}
 
 ///  - `file_name`: path to the input file
 ///  - `layer_name`: name of the layer to load
@@ -116,7 +128,7 @@ impl OgrSourceDataset {
 ///  - `start_field` and `end_field`: the name of the field that contains time information
 ///  - `start_format` and `start_format`: a mapping of a field type to a time value (cf. `OgrSourceDatasetTimeType`)
 ///  - `duration`: the duration of the time validity for all features in the file
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum OgrSourceDatasetTimeType {
     None,
@@ -155,16 +167,45 @@ impl Default for OgrSourceDatasetTimeType {
 ///   - "custom": define a custom format in the attribute `custom_format`
 ///   - "seconds": time column is numeric and contains seconds as UNIX timestamp
 ///   - "auto": time is parsed by OGR
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "format")]
 #[serde(rename_all = "camelCase")]
 pub enum OgrSourceTimeFormat {
     #[serde(rename_all = "camelCase")]
     Custom {
-        custom_format: String,
+        custom_format: DateTimeParseFormat,
     },
-    Seconds,
+    #[serde(rename_all = "camelCase")]
+    UnixTimeStamp {
+        timestamp_type: UnixTimeStampType,
+        #[serde(skip)]
+        #[serde(default = "DateTimeParseFormat::unix")]
+        fmt: DateTimeParseFormat,
+    },
     Auto,
+}
+
+impl OgrSourceTimeFormat {
+    pub fn seconds() -> Self {
+        Self::UnixTimeStamp {
+            timestamp_type: UnixTimeStampType::EpochSeconds,
+            fmt: DateTimeParseFormat::unix(),
+        }
+    }
+
+    pub fn milliseconds() -> Self {
+        Self::UnixTimeStamp {
+            timestamp_type: UnixTimeStampType::EpochMilliseconds,
+            fmt: DateTimeParseFormat::unix(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnixTimeStampType {
+    EpochSeconds,
+    EpochMilliseconds,
 }
 
 impl Default for OgrSourceTimeFormat {
@@ -180,16 +221,25 @@ impl Default for OgrSourceTimeFormat {
 ///  - float: an array of column names containing float values
 ///  - int: an array of column names containing int values
 ///  - text: an array of column names containing alpha-numeric values
+///  - bool: an array of column names containing boolean values
+///  - datetime: an array of column names containing timestamps or date strings
 ///  - rename: a. optional map of column names from data source to the name in the resulting collection
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OgrSourceColumnSpec {
     pub format_specifics: Option<FormatSpecifics>,
     pub x: String,
     pub y: Option<String>,
+    #[serde(default)]
     pub int: Vec<String>,
+    #[serde(default)]
     pub float: Vec<String>,
+    #[serde(default)]
     pub text: Vec<String>,
+    #[serde(default)]
+    pub bool: Vec<String>,
+    #[serde(default)]
+    pub datetime: Vec<String>,
     pub rename: Option<HashMap<String, String>>,
 }
 
@@ -206,11 +256,14 @@ impl OgrSourceColumnSpec {
         self.float
             .retain(|attribute| attributes.contains(attribute));
         self.text.retain(|attribute| attributes.contains(attribute));
+        self.bool.retain(|attribute| attributes.contains(attribute));
+        self.datetime
+            .retain(|attribute| attributes.contains(attribute));
     }
 }
 
 /// This enum provides all format specific options
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FormatSpecifics {
     Csv { header: CsvHeader },
@@ -219,7 +272,7 @@ pub enum FormatSpecifics {
 /// For CSV files this tells gdal whether or not the file
 /// contains a header line.
 /// The value `Auto` enables gdal's auto detection.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CsvHeader {
     Yes,
@@ -243,7 +296,7 @@ impl CsvHeader {
 /// Specify the type of error handling
 ///  - "ignore": invalid column values are kept as null, missing/invalid geom features are skipped
 ///  - "abort": invalid column values and missing/invalid geoms result in abort
-#[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OgrSourceErrorSpec {
     Ignore,
@@ -260,7 +313,7 @@ impl OgrSourceErrorSpec {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum OgrSourceDurationSpec {
     Infinite,
@@ -284,6 +337,7 @@ impl Add<OgrSourceDurationSpec> for TimeInstance {
 pub struct OgrSourceState {
     dataset_information:
         Box<dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>>,
+    attribute_filters: Vec<AttributeFilter>,
 }
 
 pub struct InitializedOgrSource {
@@ -302,12 +356,45 @@ impl VectorOperator for OgrSource {
 
         let info: Box<
             dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>,
-        > = context.meta_data(&self.params.dataset).await?;
+        > = context.meta_data(&self.params.data).await?;
+
+        let result_descriptor = info.result_descriptor().await?;
+
+        if let Some(ref attribute_filters) = self.params.attribute_filters {
+            for filter in attribute_filters {
+                if let Some(column_type) = result_descriptor.column_data_type(&filter.attribute) {
+                    for range in &filter.ranges {
+                        match range {
+                            StringOrNumberRange::String(_) => {
+                                if column_type != FeatureDataType::Text {
+                                    return Err(error::Error::InvalidFeatureDataType);
+                                }
+                            }
+                            StringOrNumberRange::Float(_) => {
+                                if column_type != FeatureDataType::Float {
+                                    return Err(error::Error::InvalidFeatureDataType);
+                                }
+                            }
+                            StringOrNumberRange::Int(_) => {
+                                if column_type != FeatureDataType::Int {
+                                    return Err(error::Error::InvalidFeatureDataType);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    return Err(error::Error::ColumnDoesNotExist {
+                        column: filter.attribute.clone(),
+                    });
+                }
+            }
+        }
 
         let initialized_source = InitializedOgrSource {
-            result_descriptor: info.result_descriptor().await?,
+            result_descriptor,
             state: OgrSourceState {
                 dataset_information: info,
+                attribute_filters: self.params.attribute_filters.unwrap_or_default(),
             },
         };
 
@@ -339,16 +426,32 @@ impl InitializedVectorOperator for InitializedOgrSource {
     fn query_processor(&self) -> Result<TypedVectorQueryProcessor> {
         Ok(match self.result_descriptor.data_type {
             VectorDataType::Data => TypedVectorQueryProcessor::Data(
-                OgrSourceProcessor::new(self.state.dataset_information.clone()).boxed(),
+                OgrSourceProcessor::new(
+                    self.state.dataset_information.clone(),
+                    self.state.attribute_filters.clone(),
+                )
+                .boxed(),
             ),
             VectorDataType::MultiPoint => TypedVectorQueryProcessor::MultiPoint(
-                OgrSourceProcessor::new(self.state.dataset_information.clone()).boxed(),
+                OgrSourceProcessor::new(
+                    self.state.dataset_information.clone(),
+                    self.state.attribute_filters.clone(),
+                )
+                .boxed(),
             ),
             VectorDataType::MultiLineString => TypedVectorQueryProcessor::MultiLineString(
-                OgrSourceProcessor::new(self.state.dataset_information.clone()).boxed(),
+                OgrSourceProcessor::new(
+                    self.state.dataset_information.clone(),
+                    self.state.attribute_filters.clone(),
+                )
+                .boxed(),
             ),
             VectorDataType::MultiPolygon => TypedVectorQueryProcessor::MultiPolygon(
-                OgrSourceProcessor::new(self.state.dataset_information.clone()).boxed(),
+                OgrSourceProcessor::new(
+                    self.state.dataset_information.clone(),
+                    self.state.attribute_filters.clone(),
+                )
+                .boxed(),
             ),
         })
     }
@@ -364,6 +467,7 @@ where
 {
     dataset_information:
         Box<dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>>,
+    attribute_filters: Vec<AttributeFilter>,
     _collection_type: PhantomData<FeatureCollection<G>>,
 }
 
@@ -375,9 +479,11 @@ where
         dataset_information: Box<
             dyn MetaData<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>,
         >,
+        attribute_filters: Vec<AttributeFilter>,
     ) -> Self {
         Self {
             dataset_information,
+            attribute_filters,
             _collection_type: Default::default(),
         }
     }
@@ -401,11 +507,14 @@ where
             self.dataset_information.loading_info(query).await?,
             query,
             ctx.chunk_byte_size().into(),
+            self.attribute_filters.clone(),
         )
         .await?
         .boxed())
     }
 }
+
+type TimeExtractorType = Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync + 'static>;
 
 #[pin_project(project = OgrSourceStreamProjection)]
 pub struct OgrSourceStream<G>
@@ -416,7 +525,9 @@ where
     dataset_iterator: Arc<Mutex<OgrDatasetIterator>>,
     data_types: Arc<HashMap<String, FeatureDataType>>,
     feature_collection_builder: FeatureCollectionBuilder<G>,
-    time_extractor: Arc<Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync + 'static>>,
+    time_extractor: Arc<TimeExtractorType>,
+    time_attribute_parser:
+        Arc<Box<dyn Fn(FieldValue) -> Result<TimeInstance> + Send + Sync + 'static>>,
     query_rectangle: VectorQueryRectangle,
     chunk_byte_size: usize,
     #[pin]
@@ -434,7 +545,7 @@ impl FeaturesProvider<'_> {
     fn layer_ref(&self) -> &Layer {
         match self {
             FeaturesProvider::Layer(l) => l,
-            FeaturesProvider::ResultSet(r) => &**r,
+            FeaturesProvider::ResultSet(r) => r,
         }
     }
 
@@ -470,6 +581,138 @@ impl FeaturesProvider<'_> {
         Ok(())
     }
 
+    ///  Creates an attribute filter string.
+    fn create_attribute_filter_string(attribute_filters: &[AttributeFilter]) -> Option<String> {
+        Self::create_attribute_filter_string_internal(
+            attribute_filters,
+            Self::create_range_filter_string,
+        )
+    }
+
+    ///  Creates an attribute filter string. This method casts
+    /// input data to the specified column type. This is especially
+    /// useful for data read from text files like CSV.
+    fn create_attribute_filter_string_cast(
+        attribute_filters: &[AttributeFilter],
+    ) -> Option<String> {
+        Self::create_attribute_filter_string_internal(
+            attribute_filters,
+            Self::create_range_filter_string_cast,
+        )
+    }
+
+    /// Creates an attribute filter string. The filter ranges
+    /// are mapped to the corresponding filter string with
+    /// the given `range_map` function.
+    fn create_attribute_filter_string_internal(
+        attribute_filters: &[AttributeFilter],
+        range_map: fn(&str, &StringOrNumberRange) -> String,
+    ) -> Option<String> {
+        if attribute_filters.is_empty() {
+            return None;
+        }
+
+        let mut filter_strings = Vec::with_capacity(attribute_filters.len());
+        for filter in attribute_filters {
+            let attribute = escape_identifier(&filter.attribute);
+            let mut range_strings = Vec::with_capacity(filter.ranges.len());
+
+            for range in &filter.ranges {
+                range_strings.push(range_map(attribute.as_str(), range));
+            }
+            filter_strings.push(format!("({})", range_strings.join(" OR ")));
+        }
+        Some(filter_strings.join(" AND "))
+    }
+
+    fn create_range_filter_string(attribute: &str, range: &StringOrNumberRange) -> String {
+        match range {
+            StringOrNumberRange::String(s) if s.start() == s.end() => {
+                format!(
+                    "({attribute} = {start})",
+                    attribute = attribute,
+                    start = escape_literal(s.start()),
+                )
+            }
+            #[allow(clippy::float_cmp)]
+            StringOrNumberRange::Float(n) if n.start() == n.end() => format!(
+                "({attribute} = {start})",
+                attribute = attribute,
+                start = n.start(),
+            ),
+            StringOrNumberRange::Int(n) if n.start() == n.end() => format!(
+                "({attribute} = {start})",
+                attribute = attribute,
+                start = n.start(),
+            ),
+            StringOrNumberRange::String(s) => {
+                format!(
+                    "({attribute} >= {start} AND {attribute} <= {stop})",
+                    attribute = attribute,
+                    start = escape_literal(s.start()),
+                    stop = escape_literal(s.end())
+                )
+            }
+            StringOrNumberRange::Float(n) => format!(
+                "({attribute} >= {start} AND {attribute} <= {stop})",
+                attribute = attribute,
+                start = n.start(),
+                stop = n.end()
+            ),
+            StringOrNumberRange::Int(n) => format!(
+                "({attribute} >= {start} AND {attribute} <= {stop})",
+                attribute = attribute,
+                start = n.start(),
+                stop = n.end()
+            ),
+        }
+    }
+
+    fn create_range_filter_string_cast(attribute: &str, range: &StringOrNumberRange) -> String {
+        match range {
+            StringOrNumberRange::String(s) if s.start() == s.end() => {
+                format!(
+                    "{attribute} = {start}",
+                    attribute = attribute,
+                    start = escape_literal(s.start()),
+
+                )
+            }
+            #[allow(clippy::float_cmp)]
+            StringOrNumberRange::Float(n) if n.start() == n.end() => format!(
+                "CAST({attribute} as float(8)) = {start}",
+                attribute = attribute,
+                start = n.start(),
+            ),
+            StringOrNumberRange::Int(n) if n.start() == n.end() => format!(
+                "CAST({attribute} as bigint) = {start}",
+                attribute = attribute,
+                start = n.start(),
+
+            ),
+            StringOrNumberRange::String(s) => {
+                format!(
+                    "{attribute} >= {start} AND {attribute} <= {stop}",
+                    attribute = attribute,
+                    start = escape_literal(s.start()),
+                    stop = escape_literal(s.end())
+                )
+            }
+            StringOrNumberRange::Float(n) => format!(
+                "CAST({attribute} as float(8)) >= {start} AND CAST({attribute} as float(8)) <= {stop}",
+                attribute = attribute,
+                start = n.start(),
+                stop = n.end()
+            ),
+            StringOrNumberRange::Int(n) => format!(
+                "CAST({attribute} as bigint) >= {start} AND CAST({attribute} as bigint) <= {stop}",
+                attribute = attribute,
+                start = n.start(),
+                stop = n.end()
+            ),
+        }
+    }
+
     fn has_gdal_capability(&self, caps: LayerCaps) -> bool {
         self.layer_ref().has_capability(caps)
     }
@@ -484,15 +727,19 @@ where
         dataset_information: OgrSourceDataset,
         query_rectangle: VectorQueryRectangle,
         chunk_byte_size: usize,
+        attribute_filters: Vec<AttributeFilter>,
     ) -> Result<Self> {
         crate::util::spawn_blocking(move || {
-            let dataset_iterator = OgrDatasetIterator::new(&dataset_information, &query_rectangle)?;
+            let dataset_iterator =
+                OgrDatasetIterator::new(&dataset_information, &query_rectangle, attribute_filters)?;
 
             let (data_types, feature_collection_builder) =
                 Self::initialize_types_and_builder(&dataset_information);
 
             let dataset_information = Arc::new(dataset_information);
             let time_extractor = Self::initialize_time_extractors(dataset_information.time.clone());
+            let time_attribute_parser =
+                Self::initialize_time_attribute_parser(dataset_information.time.clone());
 
             Ok(Self {
                 dataset_information,
@@ -501,6 +748,7 @@ where
                 feature_collection_builder,
                 query_rectangle,
                 time_extractor: Arc::new(time_extractor),
+                time_attribute_parser: Arc::new(time_attribute_parser),
                 chunk_byte_size,
                 future: None,
                 has_ended: false,
@@ -510,13 +758,15 @@ where
         .await?
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn compute_batch_future(
         dataset_iterator: Arc<Mutex<OgrDatasetIterator>>,
         dataset_information: Arc<OgrSourceDataset>,
         feature_collection_builder: FeatureCollectionBuilder<G>,
         data_types: Arc<HashMap<String, FeatureDataType>>,
         query_rectangle: VectorQueryRectangle,
-        time_extractor: Arc<Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync>>,
+        time_extractor: Arc<TimeExtractorType>,
+        time_attribute_parser: Arc<Box<dyn Fn(FieldValue) -> Result<TimeInstance> + Send + Sync>>,
         chunk_byte_size: usize,
     ) -> Result<FeatureCollection<G>> {
         crate::util::spawn_blocking(move || {
@@ -529,6 +779,7 @@ where
                 &data_types,
                 &query_rectangle,
                 time_extractor.as_ref(),
+                time_attribute_parser.as_ref(),
                 chunk_byte_size,
             );
 
@@ -556,42 +807,53 @@ where
 
         match time_format {
             OgrSourceTimeFormat::Auto => Box::new(move |field: FieldValue| match field {
-                FieldValue::DateValue(value) => Ok(value.and_hms(0, 0, 0).naive_utc().into()),
-                FieldValue::DateTimeValue(value) => Ok(value.naive_utc().into()),
+                FieldValue::DateValue(value) => Ok(DateTime::from(value.and_hms(0, 0, 0)).into()),
+                FieldValue::DateTimeValue(value) => Ok(DateTime::from(value).into()),
                 _ => Err(Error::OgrFieldValueIsNotDateTime),
             }),
             OgrSourceTimeFormat::Custom { custom_format } => Box::new(move |field: FieldValue| {
                 let date = field.into_string().ok_or(Error::OgrFieldValueIsNotString)?;
-                let date_time_result = DateTime::parse_from_str(&date, &custom_format)
-                    .map(|t| t.timestamp_millis())
-                    .or_else(|_| {
-                        NaiveDateTime::parse_from_str(&date, &custom_format)
-                            .map(|n| n.timestamp_millis())
-                    })
-                    .or_else(|_| {
-                        NaiveDate::parse_from_str(&date, &custom_format)
-                            .map(|d| d.and_hms(0, 0, 0).timestamp_millis())
-                    });
-                Ok(date_time_result?.try_into()?)
+                let datetime = DateTime::parse_from_str(&date, &custom_format).map_err(|e| {
+                    Error::TimeParse {
+                        source: Box::new(e),
+                    }
+                })?;
+
+                Ok(TimeInstance::from(datetime))
             }),
-            OgrSourceTimeFormat::Seconds => Box::new(move |field: FieldValue| match field {
-                FieldValue::IntegerValue(v) => {
-                    TimeInstance::from_millis(i64::from(v) * 1000).context(error::DataType)
+            OgrSourceTimeFormat::UnixTimeStamp {
+                timestamp_type,
+                fmt,
+            } => Box::new(move |field: FieldValue| {
+                let factor = match timestamp_type {
+                    UnixTimeStampType::EpochSeconds => 1000,
+                    UnixTimeStampType::EpochMilliseconds => 1,
+                };
+                match field {
+                    FieldValue::IntegerValue(v) => {
+                        TimeInstance::from_millis(i64::from(v) * factor).context(error::DataType)
+                    }
+                    FieldValue::Integer64Value(v) => {
+                        TimeInstance::from_millis(v * factor).context(error::DataType)
+                    }
+                    FieldValue::StringValue(v) => DateTime::parse_from_str(&v, &fmt)
+                        .map_err(|e| Error::TimeParse {
+                            source: Box::new(e),
+                        })
+                        .map(TimeInstance::from),
+                    FieldValue::RealValue(v)
+                        if timestamp_type == UnixTimeStampType::EpochSeconds =>
+                    {
+                        TimeInstance::from_millis((v * (factor as f64)) as i64)
+                            .context(error::DataType)
+                    }
+                    _ => Err(Error::OgrFieldValueIsNotValidForTimestamp),
                 }
-                FieldValue::Integer64Value(v) => {
-                    TimeInstance::from_millis(v * 1000).context(error::DataType)
-                }
-                FieldValue::StringValue(v) => DateTime::parse_from_str(&v, "%s")
-                    .context(error::TimeParse)
-                    .and_then(|d| d.timestamp_millis().try_into().context(error::DataType)),
-                _ => Err(Error::OgrFieldValueIsNotValidForSeconds),
             }),
         }
     }
 
-    fn initialize_time_extractors(
-        time: OgrSourceDatasetTimeType,
-    ) -> Box<dyn Fn(&Feature) -> Result<TimeInterval> + Send + Sync> {
+    fn initialize_time_extractors(time: OgrSourceDatasetTimeType) -> TimeExtractorType {
         // TODO: exploit rust-gdal `datetime` feature
 
         match time {
@@ -660,7 +922,7 @@ where
                         let duration = i64::from(
                             duration_field_value
                                 .into_int()
-                                .ok_or(Error::OgrFieldValueIsNotValidForSeconds)?,
+                                .ok_or(Error::OgrFieldValueIsNotValidForTimestamp)?,
                         );
 
                         TimeInterval::new(time_start, time_start + duration).map_err(Into::into)
@@ -669,6 +931,21 @@ where
                         Ok(TimeInterval::default())
                     }
                 })
+            }
+        }
+    }
+
+    fn initialize_time_attribute_parser(
+        time: OgrSourceDatasetTimeType,
+    ) -> Box<dyn Fn(FieldValue) -> Result<TimeInstance> + Send + Sync> {
+        match time {
+            OgrSourceDatasetTimeType::None => {
+                Box::new(move |_field: FieldValue| Err(Error::OgrSourceColumnsSpecMissing))
+            }
+            OgrSourceDatasetTimeType::Start { start_format, .. }
+            | OgrSourceDatasetTimeType::StartEnd { start_format, .. }
+            | OgrSourceDatasetTimeType::StartDuration { start_format, .. } => {
+                Self::create_time_parser(start_format)
             }
         }
     }
@@ -702,6 +979,18 @@ where
                     .add_column(attribute.clone(), FeatureDataType::Text)
                     .unwrap();
             }
+            for attribute in &column_spec.bool {
+                data_types.insert(attribute.clone(), FeatureDataType::Bool);
+                feature_collection_builder
+                    .add_column(attribute.clone(), FeatureDataType::Bool)
+                    .unwrap();
+            }
+            for attribute in &column_spec.datetime {
+                data_types.insert(attribute.clone(), FeatureDataType::DateTime);
+                feature_collection_builder
+                    .add_column(attribute.clone(), FeatureDataType::DateTime)
+                    .unwrap();
+            }
         }
         (data_types, feature_collection_builder)
     }
@@ -714,6 +1003,7 @@ where
         data_types: &HashMap<String, FeatureDataType>,
         query_rectangle: &VectorQueryRectangle,
         time_extractor: &dyn Fn(&Feature) -> Result<TimeInterval>,
+        time_attribute_parser: &dyn Fn(FieldValue) -> Result<TimeInstance>,
         chunk_byte_size: usize,
     ) -> Result<FeatureCollection<G>> {
         let was_spatial_filtered_by_ogr = feature_iterator.was_spatial_filtered_by_ogr();
@@ -732,6 +1022,7 @@ where
                 data_types,
                 query_rectangle,
                 time_extractor,
+                time_attribute_parser,
                 &mut builder,
                 &feature,
                 dataset_information.force_ogr_time_filter,
@@ -751,6 +1042,111 @@ where
         builder.build().map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn convert_field_value(
+        data_type: FeatureDataType,
+        field: Result<Option<FieldValue>, GdalError>,
+        time_attribute_parser: &dyn Fn(FieldValue) -> Result<TimeInstance>,
+        error_spec: OgrSourceErrorSpec,
+    ) -> Result<FeatureDataValue> {
+        match data_type {
+            FeatureDataType::Text => {
+                #[allow(clippy::match_same_arms)]
+                let text_option = match field {
+                    Ok(Some(FieldValue::IntegerValue(v))) => Some(v.to_string()),
+                    Ok(Some(FieldValue::Integer64Value(v))) => Some(v.to_string()),
+                    Ok(Some(FieldValue::StringValue(s))) => Some(s),
+                    Ok(Some(FieldValue::RealValue(v))) => Some(v.to_string()),
+                    Ok(Some(FieldValue::DateTimeValue(v))) => Some(v.to_string()), //TODO: allow multiple date columns
+                    Ok(Some(FieldValue::DateValue(v))) => Some(v.to_string()),
+                    Ok(None) => None,
+                    Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
+                        expected: "Text".to_string(),
+                        field_value: v,
+                    })?, // TODO: handle other types
+                    Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
+                };
+
+                Ok(FeatureDataValue::NullableText(text_option))
+            }
+            FeatureDataType::Float => {
+                #[allow(clippy::match_same_arms)]
+                let value_option = match field {
+                    Ok(Some(FieldValue::IntegerValue(v))) => Some(f64::from(v)),
+                    Ok(Some(FieldValue::StringValue(s))) => f64::from_str(&s).ok(),
+                    Ok(Some(FieldValue::RealValue(v))) => Some(v),
+                    Ok(None) => None,
+                    Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
+                        expected: "Float".to_string(),
+                        field_value: v,
+                    })?, // TODO: handle other types
+                    Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
+                };
+
+                Ok(FeatureDataValue::NullableFloat(value_option))
+            }
+            FeatureDataType::Int => {
+                #[allow(clippy::match_same_arms)]
+                let value_option = match field {
+                    Ok(Some(FieldValue::IntegerValue(v))) => Some(i64::from(v)),
+                    Ok(Some(FieldValue::Integer64Value(v))) => Some(v),
+                    Ok(Some(FieldValue::StringValue(s))) => i64::from_str(&s).ok(),
+                    Ok(Some(FieldValue::RealValue(v))) => Some(v as i64),
+                    Ok(None) => None,
+                    Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
+                        expected: "Int".to_string(),
+                        field_value: v,
+                    })?, // TODO: handle other types
+                    Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
+                };
+
+                Ok(FeatureDataValue::NullableInt(value_option))
+            }
+            FeatureDataType::Category => {
+                #[allow(clippy::match_same_arms)]
+                let _value_option: Option<u8> = match field {
+                    Ok(None) => None,
+                    Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
+                        expected: "Category".to_string(),
+                        field_value: v,
+                    })?, // TODO: handle other types
+                    Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
+                };
+
+                Err(Error::InvalidFeatureDataType) // TODO: ?
+            }
+            FeatureDataType::Bool => {
+                #[allow(clippy::match_same_arms)]
+                let value_option = match field {
+                    Ok(Some(FieldValue::IntegerValue(v))) => Some(v != 0),
+                    Ok(Some(FieldValue::Integer64Value(v))) => Some(v != 0),
+                    Ok(Some(FieldValue::StringValue(s))) => bool::from_str(&s.to_lowercase()).ok(),
+                    Ok(Some(FieldValue::RealValue(v))) => Some(v != 0.0),
+                    Ok(None) => None,
+                    Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
+                        expected: "Bool".to_string(),
+                        field_value: v,
+                    })?, // TODO: handle other types
+                    Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
+                };
+
+                Ok(FeatureDataValue::NullableBool(value_option))
+            }
+            FeatureDataType::DateTime => {
+                let value_option = match field {
+                    Ok(None) => None,
+                    Ok(Some(v)) => match time_attribute_parser(v) {
+                        Ok(parsed) => Ok(Some(parsed)),
+                        Err(e) => error_spec.on_error(e),
+                    }?,
+                    Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
+                };
+
+                Ok(FeatureDataValue::NullableDateTime(value_option))
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn add_feature_to_batch(
         error_spec: OgrSourceErrorSpec,
@@ -758,6 +1154,7 @@ where
         data_types: &HashMap<String, FeatureDataType>,
         query_rectangle: &VectorQueryRectangle,
         time_extractor: &dyn Fn(&Feature) -> Result<TimeInterval, Error>,
+        time_attribute_parser: &dyn Fn(FieldValue) -> Result<TimeInstance>,
         builder: &mut FeatureCollectionRowBuilder<G>,
         feature: &Feature,
         was_time_filtered_by_ogr: bool,
@@ -794,77 +1191,14 @@ where
             return Ok(());
         }
 
-        builder.push_generic_geometry(geometry)?;
-        builder.push_time_interval(time_interval)?;
+        builder.push_generic_geometry(geometry);
+        builder.push_time_interval(time_interval);
 
         for (column, data_type) in data_types {
             let field = feature.field(&column);
-
-            match data_type {
-                FeatureDataType::Text => {
-                    #[allow(clippy::match_same_arms)]
-                    let text_option = match field {
-                        Ok(Some(FieldValue::IntegerValue(v))) => Some(v.to_string()),
-                        Ok(Some(FieldValue::Integer64Value(v))) => Some(v.to_string()),
-                        Ok(Some(FieldValue::StringValue(s))) => Some(s),
-                        Ok(Some(FieldValue::RealValue(v))) => Some(v.to_string()),
-                        Ok(Some(FieldValue::DateTimeValue(v))) => Some(v.to_string()), //TODO: allow multiple date columns
-                        Ok(Some(FieldValue::DateValue(v))) => Some(v.to_string()),
-                        Ok(None) => None,
-                        Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
-                            expected: "Text".to_string(),
-                            field_value: v,
-                        })?, // TODO: handle other types
-                        Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
-                    };
-
-                    builder.push_data(column, FeatureDataValue::NullableText(text_option))?;
-                }
-                FeatureDataType::Float => {
-                    #[allow(clippy::match_same_arms)]
-                    let value_option = match field {
-                        Ok(Some(FieldValue::IntegerValue(v))) => Some(f64::from(v)),
-                        Ok(Some(FieldValue::StringValue(s))) => f64::from_str(&s).ok(),
-                        Ok(Some(FieldValue::RealValue(v))) => Some(v),
-                        Ok(None) => None,
-                        Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
-                            expected: "Float".to_string(),
-                            field_value: v,
-                        })?, // TODO: handle other types
-                        Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
-                    };
-
-                    builder.push_data(column, FeatureDataValue::NullableFloat(value_option))?;
-                }
-                FeatureDataType::Int => {
-                    #[allow(clippy::match_same_arms)]
-                    let value_option = match field {
-                        Ok(Some(FieldValue::IntegerValue(v))) => Some(i64::from(v)),
-                        Ok(Some(FieldValue::Integer64Value(v))) => Some(v),
-                        Ok(Some(FieldValue::StringValue(s))) => i64::from_str(&s).ok(),
-                        Ok(Some(FieldValue::RealValue(v))) => Some(v as i64),
-                        Ok(None) => None,
-                        Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
-                            expected: "Int".to_string(),
-                            field_value: v,
-                        })?, // TODO: handle other types
-                        Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
-                    };
-
-                    builder.push_data(column, FeatureDataValue::NullableInt(value_option))?;
-                }
-                FeatureDataType::Category => {
-                    #[allow(clippy::match_same_arms)]
-                    let _value_option: Option<u8> = match field {
-                        Ok(None) => None,
-                        Ok(Some(v)) => error_spec.on_error(Error::OgrColumnFieldTypeMismatch {
-                            expected: "Category".to_string(),
-                            field_value: v,
-                        })?, // TODO: handle other types
-                        Err(e) => error_spec.on_error(Error::Gdal { source: e })?,
-                    };
-                }
-            }
+            let value =
+                Self::convert_field_value(*data_type, field, time_attribute_parser, error_spec)?;
+            builder.push_data(column, value)?;
         }
 
         builder.finish_row();
@@ -929,6 +1263,7 @@ where
                 this.data_types.clone(),
                 *this.query_rectangle,
                 this.time_extractor.clone(),
+                this.time_attribute_parser.clone(),
                 *this.chunk_byte_size,
             );
 
@@ -1054,38 +1389,38 @@ pub trait FeatureCollectionBuilderGeometryHandler<G>
 where
     G: Geometry,
 {
-    fn push_generic_geometry(&mut self, geometry: G) -> Result<()>;
+    fn push_generic_geometry(&mut self, geometry: G);
 }
 
 impl FeatureCollectionBuilderGeometryHandler<MultiPoint>
     for FeatureCollectionRowBuilder<MultiPoint>
 {
-    fn push_generic_geometry(&mut self, geometry: MultiPoint) -> Result<()> {
-        self.push_geometry(geometry).map_err(Into::into)
+    fn push_generic_geometry(&mut self, geometry: MultiPoint) {
+        self.push_geometry(geometry);
     }
 }
 
 impl FeatureCollectionBuilderGeometryHandler<MultiLineString>
     for FeatureCollectionRowBuilder<MultiLineString>
 {
-    fn push_generic_geometry(&mut self, geometry: MultiLineString) -> Result<()> {
-        self.push_geometry(geometry).map_err(Into::into)
+    fn push_generic_geometry(&mut self, geometry: MultiLineString) {
+        self.push_geometry(geometry);
     }
 }
 
 impl FeatureCollectionBuilderGeometryHandler<MultiPolygon>
     for FeatureCollectionRowBuilder<MultiPolygon>
 {
-    fn push_generic_geometry(&mut self, geometry: MultiPolygon) -> Result<()> {
-        self.push_geometry(geometry).map_err(Into::into)
+    fn push_generic_geometry(&mut self, geometry: MultiPolygon) {
+        self.push_geometry(geometry);
     }
 }
 
 impl FeatureCollectionBuilderGeometryHandler<NoGeometry>
     for FeatureCollectionRowBuilder<NoGeometry>
 {
-    fn push_generic_geometry(&mut self, _geometry: NoGeometry) -> Result<()> {
-        Ok(()) // do nothing
+    fn push_generic_geometry(&mut self, _geometry: NoGeometry) {
+        // do nothing
     }
 }
 
@@ -1093,7 +1428,9 @@ impl FeatureCollectionBuilderGeometryHandler<NoGeometry>
 mod tests {
     use super::*;
 
-    use crate::engine::{ChunkByteSize, MockExecutionContext, MockQueryContext, StaticMetaData};
+    use crate::engine::{
+        ChunkByteSize, MockExecutionContext, MockQueryContext, StaticMetaData, VectorColumnInfo,
+    };
     use crate::source::ogr_source::FormatSpecifics::Csv;
     use crate::test_data;
     use futures::{StreamExt, TryStreamExt};
@@ -1101,9 +1438,9 @@ mod tests {
         DataCollection, FeatureCollectionInfos, GeometryCollection, MultiPointCollection,
         MultiPolygonCollection,
     };
-    use geoengine_datatypes::dataset::InternalDatasetId;
+    use geoengine_datatypes::dataset::{DataId, DatasetId};
     use geoengine_datatypes::primitives::{
-        BoundingBox2D, FeatureData, SpatialResolution, TimeGranularity,
+        BoundingBox2D, FeatureData, Measurement, SpatialResolution, TimeGranularity,
     };
     use geoengine_datatypes::spatial_reference::{SpatialReference, SpatialReferenceOption};
     use geoengine_datatypes::util::test::TestDefault;
@@ -1120,7 +1457,7 @@ mod tests {
             time: OgrSourceDatasetTimeType::Start {
                 start_field: "start".to_string(),
                 start_format: OgrSourceTimeFormat::Custom {
-                    custom_format: "YYYY-MM-DD".to_string(),
+                    custom_format: DateTimeParseFormat::custom("%Y-%m-%d".to_string()),
                 },
                 duration: OgrSourceDurationSpec::Value(TimeStep {
                     granularity: TimeGranularity::Seconds,
@@ -1139,6 +1476,8 @@ mod tests {
                 float: vec!["num".to_string()],
                 int: vec!["dec1".to_string(), "dec2".to_string()],
                 text: vec!["text".to_string()],
+                bool: vec![],
+                datetime: vec![],
                 rename: None,
             }),
             force_ogr_time_filter: false,
@@ -1148,7 +1487,7 @@ mod tests {
             attribute_query: None,
         };
 
-        let serialized_spec = serde_json::to_string(&spec).unwrap();
+        let serialized_spec = serde_json::to_value(&spec).unwrap();
 
         assert_eq!(
             serialized_spec,
@@ -1161,11 +1500,11 @@ mod tests {
                     "startField": "start",
                     "startFormat": {
                         "format": "custom",
-                        "customFormat": "YYYY-MM-DD"
+                        "customFormat": "%Y-%m-%d"
                     },
                     "duration": {
                         "type": "value",
-                        "granularity": "Seconds",
+                        "granularity": "seconds",
                         "step": 42
                     }
                 },
@@ -1185,6 +1524,8 @@ mod tests {
                     "int": ["dec1", "dec2"],
                     "float": ["num"],
                     "text": ["text"],
+                    "bool": [],
+                    "datetime": [],
                     "rename": null
                 },
                 "forceOgrTimeFilter": false,
@@ -1193,7 +1534,6 @@ mod tests {
                 "sqlQuery": null,
                 "attributeQuery": null
             })
-            .to_string()
         );
 
         let deserialized_spec: OgrSourceDataset = serde_json::from_str(
@@ -1206,11 +1546,11 @@ mod tests {
                     "startField": "start",
                     "startFormat": {
                         "format": "custom",
-                        "customFormat": "YYYY-MM-DD"
+                        "customFormat": "%Y-%m-%d"
                     },
                     "duration": {
                         "type": "value",
-                        "granularity": "Seconds",
+                        "granularity": "seconds",
                         "step": 42
                     }
                 },
@@ -1229,7 +1569,9 @@ mod tests {
                     "y": "y",
                     "int": ["dec1", "dec2"],
                     "float": ["num"],
-                    "text": ["text"]
+                    "text": ["text"],
+                    "bool": [],
+                    "datetime": []
                 },
                 "forceOgrTimeFilter": false,
                 "forceOgrSpatialFilter": false,
@@ -1243,7 +1585,6 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-
         assert_eq!(deserialized_spec, spec);
     }
 
@@ -1269,11 +1610,13 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: Default::default(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -1318,11 +1661,13 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: Default::default(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -1360,11 +1705,13 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: Default::default(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -1407,11 +1754,13 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: Default::default(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -1444,12 +1793,10 @@ mod tests {
 
     #[tokio::test]
     async fn ne_10m_ports_bbox_filter() -> Result<()> {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
@@ -1468,6 +1815,8 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -1475,8 +1824,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -1539,12 +1889,10 @@ mod tests {
 
     #[tokio::test]
     async fn ne_10m_ports_force_spatial_filter() -> Result<()> {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
@@ -1563,6 +1911,8 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -1570,8 +1920,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -1634,12 +1985,10 @@ mod tests {
 
     #[tokio::test]
     async fn ne_10m_ports_fast_spatial_filter() -> Result<()> {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!(
@@ -1661,6 +2010,8 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -1668,8 +2019,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -1733,9 +2085,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn ne_10m_ports_columns() -> Result<()> {
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
             id.clone(),
@@ -1757,6 +2107,8 @@ mod tests {
                             "name".to_string(),
                             "website".to_string(),
                         ],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -1769,15 +2121,47 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: [
-                        ("natlscale".to_string(), FeatureDataType::Float),
-                        ("scalerank".to_string(), FeatureDataType::Int),
-                        ("featurecla".to_string(), FeatureDataType::Int),
-                        ("name".to_string(), FeatureDataType::Text),
-                        ("website".to_string(), FeatureDataType::Text),
+                        (
+                            "natlscale".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Float,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "scalerank".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "featurecla".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "name".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "website".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
                     ]
                     .iter()
                     .cloned()
                     .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -1785,8 +2169,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset: id.clone(),
+                data: id.clone(),
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -1924,9 +2309,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn ne_10m_ports() -> Result<()> {
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
             id.clone(),
@@ -1948,6 +2331,8 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -1955,8 +2340,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset: id.clone(),
+                data: id.clone(),
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -3092,6 +3478,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn plain_data() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -3108,6 +3495,8 @@ mod tests {
                 float: vec!["b".to_string()],
                 int: vec!["a".to_string()],
                 text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
                 rename: None,
             }),
             force_ogr_time_filter: false,
@@ -3123,18 +3512,38 @@ mod tests {
                 data_type: VectorDataType::Data,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
                 .collect(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<NoGeometry>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -3185,6 +3594,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn default_geometry() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -3203,6 +3613,8 @@ mod tests {
                 float: vec!["b".to_string()],
                 int: vec!["a".to_string()],
                 text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
                 rename: None,
             }),
             force_ogr_time_filter: false,
@@ -3218,18 +3630,38 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("a".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
                 .collect(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<MultiPoint>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -3282,9 +3714,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn chunked() -> Result<()> {
-        let id = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
             id.clone(),
@@ -3306,6 +3736,8 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -3313,8 +3745,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset: id.clone(),
+                data: id.clone(),
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -3529,12 +3962,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
@@ -3553,6 +3984,8 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -3560,8 +3993,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -3605,12 +4039,10 @@ mod tests {
 
     #[tokio::test]
     async fn polygon_gpkg() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/germany_polygon.gpkg").into(),
@@ -3625,6 +4057,8 @@ mod tests {
                         int: vec![],
                         float: vec![],
                         text: vec![],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -3637,6 +4071,8 @@ mod tests {
                     data_type: VectorDataType::MultiPolygon,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: Default::default(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -3644,8 +4080,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -3697,13 +4134,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/points.csv").into(),
@@ -3720,6 +4156,8 @@ mod tests {
                         int: vec!["num".to_owned()],
                         float: vec![],
                         text: vec!["txt".to_owned()],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -3732,12 +4170,26 @@ mod tests {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
                     columns: [
-                        ("num".to_string(), FeatureDataType::Int),
-                        ("txt".to_string(), FeatureDataType::Text),
+                        (
+                            "num".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Int,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "txt".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
                     ]
                     .iter()
                     .cloned()
                     .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -3745,8 +4197,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -3804,13 +4257,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_date_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date.csv").into(),
@@ -3819,7 +4271,7 @@ mod tests {
                     time: OgrSourceDatasetTimeType::Start {
                         start_field: "Date".to_owned(),
                         start_format: OgrSourceTimeFormat::Custom {
-                            custom_format: "%d.%m.%Y".to_owned(),
+                            custom_format: DateTimeParseFormat::custom("%d.%m.%Y".to_owned()),
                         },
                         duration: OgrSourceDurationSpec::Value(TimeStep {
                             granularity: TimeGranularity::Seconds,
@@ -3836,6 +4288,8 @@ mod tests {
                         int: vec![],
                         float: vec![],
                         text: vec!["Name".to_owned()],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -3847,10 +4301,18 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -3858,8 +4320,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -3913,13 +4376,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_date_time_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date_time.csv").into(),
@@ -3928,7 +4390,9 @@ mod tests {
                     time: OgrSourceDatasetTimeType::Start {
                         start_field: "DateTime".to_owned(),
                         start_format: OgrSourceTimeFormat::Custom {
-                            custom_format: "%d.%m.%Y %H:%M:%S".to_owned(),
+                            custom_format: DateTimeParseFormat::custom(
+                                "%d.%m.%Y %H:%M:%S".to_owned(),
+                            ),
                         },
                         duration: OgrSourceDurationSpec::Value(TimeStep {
                             granularity: TimeGranularity::Seconds,
@@ -3945,6 +4409,8 @@ mod tests {
                         int: vec![],
                         float: vec![],
                         text: vec!["Name".to_owned()],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -3956,10 +4422,18 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -3967,8 +4441,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -4022,13 +4497,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn points_date_time_tz_csv() {
-        let dataset = DatasetId::Internal {
-            dataset_id: InternalDatasetId::new(),
-        };
+        let id: DataId = DatasetId::new().into();
         let mut exe_ctx = MockExecutionContext::test_default();
         exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
-            dataset.clone(),
+            id.clone(),
             Box::new(StaticMetaData {
                 loading_info: OgrSourceDataset {
                     file_name: test_data!("vector/data/lonlat_date_time_tz.csv").into(),
@@ -4037,7 +4511,9 @@ mod tests {
                     time: OgrSourceDatasetTimeType::Start {
                         start_field: "DateTimeTz".to_owned(),
                         start_format: OgrSourceTimeFormat::Custom {
-                            custom_format: "%d.%m.%Y %H:%M:%S %z".to_owned(),
+                            custom_format: DateTimeParseFormat::custom(
+                                "%d.%m.%Y %H:%M:%S %:z".to_owned(),
+                            ),
                         },
                         duration: OgrSourceDurationSpec::Value(TimeStep {
                             granularity: TimeGranularity::Seconds,
@@ -4054,6 +4530,8 @@ mod tests {
                         int: vec![],
                         float: vec![],
                         text: vec!["Name".to_owned()],
+                        bool: vec![],
+                        datetime: vec![],
                         rename: None,
                     }),
                     force_ogr_time_filter: false,
@@ -4065,10 +4543,18 @@ mod tests {
                 result_descriptor: VectorResultDescriptor {
                     data_type: VectorDataType::MultiPoint,
                     spatial_reference: SpatialReference::epsg_4326().into(),
-                    columns: [("Name".to_string(), FeatureDataType::Text)]
-                        .iter()
-                        .cloned()
-                        .collect(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
                 },
                 phantom: Default::default(),
             }),
@@ -4076,8 +4562,9 @@ mod tests {
 
         let source = OgrSource {
             params: OgrSourceParameters {
-                dataset,
+                data: id,
                 attribute_projection: None,
+                attribute_filters: None,
             },
         }
         .boxed()
@@ -4131,6 +4618,374 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn points_unix_date() {
+        let id: DataId = DatasetId::new().into();
+        let mut exe_ctx = MockExecutionContext::test_default();
+        exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
+            id.clone(),
+            Box::new(StaticMetaData {
+                loading_info: OgrSourceDataset {
+                    file_name: test_data!("vector/data/lonlat_unix_date.csv").into(),
+                    layer_name: "lonlat_unix_date".to_owned(),
+                    data_type: Some(VectorDataType::MultiPoint),
+                    time: OgrSourceDatasetTimeType::Start {
+                        start_field: "DateTime".to_owned(),
+                        start_format: OgrSourceTimeFormat::seconds(),
+                        duration: OgrSourceDurationSpec::Value(TimeStep {
+                            granularity: TimeGranularity::Seconds,
+                            step: 84,
+                        }),
+                    },
+                    default_geometry: None,
+                    columns: Some(OgrSourceColumnSpec {
+                        format_specifics: Some(Csv {
+                            header: CsvHeader::Yes,
+                        }),
+                        x: "Longitude".to_owned(),
+                        y: Some("Latitude".to_owned()),
+                        int: vec![],
+                        float: vec![],
+                        text: vec!["Name".to_owned()],
+                        bool: vec![],
+                        datetime: vec![],
+                        rename: None,
+                    }),
+                    force_ogr_time_filter: false,
+                    force_ogr_spatial_filter: false,
+                    on_error: OgrSourceErrorSpec::Abort,
+                    sql_query: None,
+                    attribute_query: None,
+                },
+                result_descriptor: VectorResultDescriptor {
+                    data_type: VectorDataType::MultiPoint,
+                    spatial_reference: SpatialReference::epsg_4326().into(),
+                    columns: [(
+                        "Name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
+                },
+                phantom: Default::default(),
+            }),
+        );
+
+        let source = OgrSource {
+            params: OgrSourceParameters {
+                data: id,
+                attribute_projection: None,
+                attribute_filters: None,
+            },
+        }
+        .boxed()
+        .initialize(&exe_ctx)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            source.result_descriptor().data_type,
+            VectorDataType::MultiPoint
+        );
+        assert_eq!(
+            source.result_descriptor().spatial_reference,
+            SpatialReference::epsg_4326().into()
+        );
+
+        let query_processor = source.query_processor().unwrap().multi_point().unwrap();
+
+        let query_bbox = BoundingBox2D::new((-180.0, -90.0).into(), (180.00, 90.0).into()).unwrap();
+
+        let context = MockQueryContext::new((1024 * 1024).into());
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: query_bbox,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.).unwrap(),
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<MultiPointCollection> = query.try_collect().await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        let result = result.into_iter().next().unwrap();
+
+        let pc = MultiPointCollection::from_data(
+            MultiPoint::many(vec![vec![(1.1, 2.2)]]).unwrap(),
+            vec![TimeInterval::new(819_824_400_500, 819_824_484_500).unwrap()],
+            {
+                let mut map = HashMap::new();
+                map.insert("Name".into(), FeatureData::Text(vec!["foo".to_owned()]));
+                map
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, pc);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn vector_date_time_csv() {
+        let id: DataId = DatasetId::new().into();
+        let mut exe_ctx = MockExecutionContext::test_default();
+        exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
+            id.clone(),
+            Box::new(StaticMetaData {
+                loading_info: OgrSourceDataset {
+                    file_name: test_data!("vector/data/lonlat_date_time.csv").into(),
+                    layer_name: "lonlat_date_time".to_owned(),
+                    data_type: Some(VectorDataType::MultiPoint),
+                    time: OgrSourceDatasetTimeType::Start {
+                        start_field: "DateTime".to_owned(),
+                        start_format: OgrSourceTimeFormat::Custom {
+                            custom_format: DateTimeParseFormat::custom(
+                                "%d.%m.%Y %H:%M:%S".to_owned(),
+                            ),
+                        },
+                        duration: OgrSourceDurationSpec::Value(TimeStep {
+                            granularity: TimeGranularity::Seconds,
+                            step: 84,
+                        }),
+                    },
+                    default_geometry: None,
+                    columns: Some(OgrSourceColumnSpec {
+                        format_specifics: Some(Csv {
+                            header: CsvHeader::Yes,
+                        }),
+                        x: "Longitude".to_owned(),
+                        y: Some("Latitude".to_owned()),
+                        int: vec![],
+                        float: vec![],
+                        text: vec!["Name".to_owned()],
+                        bool: vec![],
+                        datetime: vec!["DateTime".to_owned()],
+                        rename: None,
+                    }),
+                    force_ogr_time_filter: false,
+                    force_ogr_spatial_filter: false,
+                    on_error: OgrSourceErrorSpec::Abort,
+                    sql_query: None,
+                    attribute_query: None,
+                },
+                result_descriptor: VectorResultDescriptor {
+                    data_type: VectorDataType::MultiPoint,
+                    spatial_reference: SpatialReference::epsg_4326().into(),
+                    columns: [
+                        (
+                            "Name".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::Text,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                        (
+                            "DateTime".to_string(),
+                            VectorColumnInfo {
+                                data_type: FeatureDataType::DateTime,
+                                measurement: Measurement::Unitless,
+                            },
+                        ),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
+                },
+                phantom: Default::default(),
+            }),
+        );
+
+        let source = OgrSource {
+            params: OgrSourceParameters {
+                data: id,
+                attribute_projection: None,
+                attribute_filters: None,
+            },
+        }
+        .boxed()
+        .initialize(&exe_ctx)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            source.result_descriptor().data_type,
+            VectorDataType::MultiPoint
+        );
+        assert_eq!(
+            source.result_descriptor().spatial_reference,
+            SpatialReference::epsg_4326().into()
+        );
+
+        let query_processor = source.query_processor().unwrap().multi_point().unwrap();
+
+        let query_bbox = BoundingBox2D::new((-180.0, -90.0).into(), (180.00, 90.0).into()).unwrap();
+
+        let context = MockQueryContext::new((1024 * 1024).into());
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: query_bbox,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.).unwrap(),
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<MultiPointCollection> = query.try_collect().await.unwrap();
+        assert_eq!(result.len(), 1);
+
+        let result = result.into_iter().next().unwrap();
+
+        let pc = MultiPointCollection::from_data(
+            MultiPoint::many(vec![vec![(1.1, 2.2)]]).unwrap(),
+            vec![TimeInterval::new(819_828_000_000, 819_828_084_000).unwrap()],
+            {
+                let mut map = HashMap::new();
+                map.insert(
+                    "DateTime".into(),
+                    FeatureData::DateTime(vec![TimeInstance::from_millis_unchecked(
+                        819_828_000_000,
+                    )]),
+                );
+                map.insert("Name".into(), FeatureData::Text(vec!["foo".to_owned()]));
+                map
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, pc);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn points_bool_csv() {
+        let id: DataId = DatasetId::new().into();
+        let mut exe_ctx = MockExecutionContext::test_default();
+        exe_ctx.add_meta_data::<OgrSourceDataset, VectorResultDescriptor, VectorQueryRectangle>(
+            id.clone(),
+            Box::new(StaticMetaData {
+                loading_info: OgrSourceDataset {
+                    file_name: test_data!("vector/data/points_with_bool.csv").into(),
+                    layer_name: "points_with_bool".to_owned(),
+                    data_type: Some(VectorDataType::MultiPoint),
+                    time: OgrSourceDatasetTimeType::None,
+                    default_geometry: None,
+                    columns: Some(OgrSourceColumnSpec {
+                        format_specifics: Some(Csv {
+                            header: CsvHeader::Yes,
+                        }),
+                        x: "x".to_owned(),
+                        y: Some("y".to_owned()),
+                        int: vec![],
+                        float: vec![],
+                        text: vec![],
+                        bool: vec!["bool".to_owned()],
+                        datetime: vec![],
+                        rename: None,
+                    }),
+                    force_ogr_time_filter: false,
+                    force_ogr_spatial_filter: false,
+                    on_error: OgrSourceErrorSpec::Abort,
+                    sql_query: None,
+                    attribute_query: None,
+                },
+                result_descriptor: VectorResultDescriptor {
+                    data_type: VectorDataType::MultiPoint,
+                    spatial_reference: SpatialReference::epsg_4326().into(),
+                    columns: [(
+                        "bool".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Bool,
+                            measurement: Measurement::Unitless,
+                        },
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
+                    time: None,
+                    bbox: None,
+                },
+                phantom: Default::default(),
+            }),
+        );
+
+        let source = OgrSource {
+            params: OgrSourceParameters {
+                data: id,
+                attribute_projection: None,
+                attribute_filters: None,
+            },
+        }
+        .boxed()
+        .initialize(&exe_ctx)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            source.result_descriptor().data_type,
+            VectorDataType::MultiPoint
+        );
+        assert_eq!(
+            source.result_descriptor().spatial_reference,
+            SpatialReference::epsg_4326().into()
+        );
+
+        let query_processor = source.query_processor().unwrap().multi_point().unwrap();
+
+        let query_bbox = BoundingBox2D::new((-180.0, -90.0).into(), (180.00, 90.0).into()).unwrap();
+
+        let context = MockQueryContext::new((1024 * 1024).into());
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: query_bbox,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.).unwrap(),
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<MultiPointCollection> = query.try_collect().await.unwrap();
+
+        assert_eq!(result.len(), 1);
+        let result = result.into_iter().next().unwrap();
+
+        let pc = MultiPointCollection::from_data(
+            MultiPoint::many(vec![vec![(1.1, 2.2)], vec![(3.3, 4.4)], vec![(7.2, 5.9)]]).unwrap(),
+            vec![
+                TimeInterval::default(),
+                TimeInterval::default(),
+                TimeInterval::default(),
+            ],
+            {
+                let mut map = HashMap::new();
+                map.insert("bool".into(), FeatureData::Bool(vec![true, false, true]));
+                map
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, pc);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn rename() -> Result<()> {
         let dataset_information = OgrSourceDataset {
             file_name: test_data!("vector/data/plain_data.csv").into(),
@@ -4147,6 +5002,8 @@ mod tests {
                 float: vec!["b".to_string()],
                 int: vec!["a".to_string()],
                 text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
                 rename: Some(
                     [("a".to_owned(), "foo".to_owned())]
                         .iter()
@@ -4167,18 +5024,38 @@ mod tests {
                 data_type: VectorDataType::MultiPoint,
                 spatial_reference: SpatialReferenceOption::Unreferenced,
                 columns: [
-                    ("foo".to_string(), FeatureDataType::Int),
-                    ("b".to_string(), FeatureDataType::Float),
-                    ("c".to_string(), FeatureDataType::Text),
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
                 ]
                 .iter()
                 .cloned()
                 .collect(),
+                time: None,
+                bbox: None,
             },
             phantom: Default::default(),
         };
 
-        let query_processor = OgrSourceProcessor::<NoGeometry>::new(Box::new(info));
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(Box::new(info), vec![]);
 
         let context = MockQueryContext::new(ChunkByteSize::MAX);
         let query = query_processor
@@ -4224,6 +5101,1190 @@ mod tests {
                 .collect(),
             )?
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_string() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "c".to_owned(),
+                ranges: vec![StringOrNumberRange::String(
+                    "foo".to_owned()..="foo".to_owned(),
+                )],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 1],
+                [
+                    ("a".to_string(), FeatureData::NullableInt(vec![Some(1)])),
+                    ("b".to_string(), FeatureData::NullableFloat(vec![Some(5.4)])),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![Some("foo".to_string()),])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_int() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "a".to_owned(),
+                ranges: vec![StringOrNumberRange::Int(2..=2)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 1],
+                [
+                    ("a".to_string(), FeatureData::NullableInt(vec![Some(2)])),
+                    ("b".to_string(), FeatureData::NullableFloat(vec![None])),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![Some("bar".to_string()),])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_float() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "a".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "b".to_owned(),
+                ranges: vec![StringOrNumberRange::Float(5.4..=5.4)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 1],
+                [
+                    ("a".to_string(), FeatureData::NullableInt(vec![Some(1)])),
+                    ("b".to_string(), FeatureData::NullableFloat(vec![Some(5.4)])),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![Some("foo".to_string()),])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_int_renamed() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: Some(
+                    [("a".to_string(), "d".to_string())]
+                        .into_iter()
+                        .collect::<HashMap<_, _>>(),
+                ),
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "d".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "d".to_owned(),
+                ranges: vec![StringOrNumberRange::Int(2..=2)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 1],
+                [
+                    ("d".to_string(), FeatureData::NullableInt(vec![Some(2)])),
+                    ("b".to_string(), FeatureData::NullableFloat(vec![None])),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![Some("bar".to_string()),])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_int_multi_range() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "foo".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "a".to_owned(),
+                ranges: vec![
+                    StringOrNumberRange::Int(1..=1),
+                    StringOrNumberRange::Int(2..=2),
+                ],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 2],
+                [
+                    (
+                        "a".to_string(),
+                        FeatureData::NullableInt(vec![Some(1), Some(2)])
+                    ),
+                    (
+                        "b".to_string(),
+                        FeatureData::NullableFloat(vec![Some(5.4), None])
+                    ),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![
+                            Some("foo".to_string()),
+                            Some("bar".to_string()),
+                        ])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_multi() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "foo".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![
+                AttributeFilter {
+                    attribute: "a".to_owned(),
+                    ranges: vec![StringOrNumberRange::Int(1..=1)],
+                    keep_nulls: false,
+                },
+                AttributeFilter {
+                    attribute: "c".to_owned(),
+                    ranges: vec![StringOrNumberRange::String(
+                        "foo".to_string()..="foo".to_string(),
+                    )],
+                    keep_nulls: false,
+                },
+            ],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 1],
+                [
+                    ("a".to_string(), FeatureData::NullableInt(vec![Some(1)])),
+                    ("b".to_string(), FeatureData::NullableFloat(vec![Some(5.4)])),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![Some("foo".to_string()),])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn attribute_filter_with_attribute_query() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/plain_data.csv").into(),
+            layer_name: "plain_data".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["b".to_string()],
+                int: vec!["a".to_string()],
+                text: vec!["c".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: Some("\"c\" = 'foo'".to_string()),
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "foo".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Int,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "c".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "a".to_owned(),
+                ranges: vec![StringOrNumberRange::Int(1..=1)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(
+            result[0],
+            DataCollection::from_data(
+                vec![],
+                vec![Default::default(); 1],
+                [
+                    ("a".to_string(), FeatureData::NullableInt(vec![Some(1)])),
+                    ("b".to_string(), FeatureData::NullableFloat(vec![Some(5.4)])),
+                    (
+                        "c".to_string(),
+                        FeatureData::NullableText(vec![Some("foo".to_string()),])
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+            )?
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attribute_filter_float_gpkg() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
+            layer_name: "ne_10m_ports".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["natlscale".to_string()],
+                int: vec![],
+                text: vec!["name".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "natlscale".to_owned(),
+                ranges: vec![StringOrNumberRange::Float(75.0..=75.0)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(result[0].len(), 67);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attribute_filter_float_gpkg_multi_range() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
+            layer_name: "ne_10m_ports".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["natlscale".to_string()],
+                int: vec![],
+                text: vec!["name".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "natlscale".to_owned(),
+                ranges: vec![
+                    StringOrNumberRange::Float(50.0..=50.0),
+                    StringOrNumberRange::Float(75.0..=75.0),
+                ],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(result[0].len(), 143);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attribute_filter_and_attribute_query() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
+            layer_name: "ne_10m_ports".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["natlscale".to_string()],
+                int: vec![],
+                text: vec!["name".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: Some("\"name\" = 'Bangkok'".to_string()),
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "natlscale".to_owned(),
+                ranges: vec![StringOrNumberRange::Float(50.0..=50.0)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(result[0].len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attribute_filter_range() -> Result<()> {
+        let dataset_information = OgrSourceDataset {
+            file_name: test_data!("vector/data/ne_10m_ports/ne_10m_ports.shp").into(),
+            layer_name: "ne_10m_ports".to_string(),
+            data_type: None,
+            time: OgrSourceDatasetTimeType::None,
+            default_geometry: None,
+            columns: Some(OgrSourceColumnSpec {
+                format_specifics: Some(Csv {
+                    header: CsvHeader::Yes,
+                }),
+                x: "".to_string(),
+                y: None,
+                float: vec!["natlscale".to_string()],
+                int: vec![],
+                text: vec!["name".to_string()],
+                bool: vec![],
+                datetime: vec![],
+                rename: None,
+            }),
+            force_ogr_time_filter: false,
+            force_ogr_spatial_filter: false,
+            on_error: OgrSourceErrorSpec::Ignore,
+            sql_query: None,
+            attribute_query: None,
+        };
+
+        let info = StaticMetaData {
+            loading_info: dataset_information,
+            result_descriptor: VectorResultDescriptor {
+                data_type: VectorDataType::MultiPoint,
+                spatial_reference: SpatialReferenceOption::Unreferenced,
+                columns: [
+                    (
+                        "natlscale".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Float,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                    (
+                        "name".to_string(),
+                        VectorColumnInfo {
+                            data_type: FeatureDataType::Text,
+                            measurement: Measurement::Unitless,
+                        },
+                    ),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
+                time: None,
+                bbox: None,
+            },
+            phantom: Default::default(),
+        };
+
+        let query_processor = OgrSourceProcessor::<NoGeometry>::new(
+            Box::new(info),
+            vec![AttributeFilter {
+                attribute: "natlscale".to_owned(),
+                ranges: vec![StringOrNumberRange::Float(75.0..=76.0)],
+                keep_nulls: false,
+            }],
+        );
+
+        let context = MockQueryContext::new(ChunkByteSize::MAX);
+        let query = query_processor
+            .query(
+                VectorQueryRectangle {
+                    spatial_bounds: BoundingBox2D::new((0., 0.).into(), (1., 1.).into())?,
+                    time_interval: Default::default(),
+                    spatial_resolution: SpatialResolution::new(1., 1.)?,
+                },
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let result: Vec<DataCollection> = query.try_collect().await?;
+
+        assert_eq!(result.len(), 1);
+
+        assert_eq!(result[0].len(), 67);
 
         Ok(())
     }

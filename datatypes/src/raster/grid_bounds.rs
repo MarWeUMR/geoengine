@@ -3,8 +3,8 @@ use snafu::ensure;
 use crate::{error, util::Result};
 
 use super::{
-    BoundedGrid, GridBounds, GridContains, GridIdx, GridIntersection, GridSize,
-    GridSpaceToLinearSpace,
+    BoundedGrid, GridBounds, GridContains, GridIdx, GridIntersection, GridShape, GridShapeAccess,
+    GridSize, GridSpaceToLinearSpace,
 };
 
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
@@ -62,6 +62,19 @@ impl GridSize for GridBoundingBox<[isize; 1]> {
     fn number_of_elements(&self) -> usize {
         let [a] = self.axis_size();
         a
+    }
+}
+
+impl<A, B> GridShapeAccess for GridBoundingBox<A>
+where
+    Self: GridSize<ShapeArray = B>,
+    A: AsRef<[isize]>,
+    B: AsRef<[usize]>,
+    GridShape<B>: From<B>,
+{
+    type ShapeArray = B;
+    fn grid_shape_array(&self) -> Self::ShapeArray {
+        self.axis_size()
     }
 }
 
@@ -194,6 +207,7 @@ impl GridSpaceToLinearSpace for GridBoundingBox<[isize; 1]> {
 
     fn linear_space_index_unchecked<I: Into<GridIdx<Self::IndexArray>>>(&self, index: I) -> usize {
         let idx = index.into();
+        debug_assert!(self.contains(&idx));
         let GridIdx([zero_idx_x]) = idx - GridIdx::from(self.min);
         let [stride_x] = self.strides();
         zero_idx_x as usize * stride_x
@@ -227,6 +241,7 @@ impl GridSpaceToLinearSpace for GridBoundingBox<[isize; 2]> {
 
     fn linear_space_index_unchecked<I: Into<GridIdx<Self::IndexArray>>>(&self, index: I) -> usize {
         let idx = index.into();
+        debug_assert!(self.contains(&idx));
         let GridIdx([zero_idx_y, zero_idx_x]) = idx - GridIdx::from(self.min);
         let [stride_y, stride_x] = self.strides();
         zero_idx_y as usize * stride_y + zero_idx_x as usize * stride_x
@@ -268,6 +283,7 @@ impl GridSpaceToLinearSpace for GridBoundingBox<[isize; 3]> {
 
     fn linear_space_index_unchecked<I: Into<GridIdx<Self::IndexArray>>>(&self, index: I) -> usize {
         let idx = index.into();
+        debug_assert!(self.contains(&idx));
         let GridIdx([zero_idx_z, zero_idx_y, zero_idx_x]) = idx - GridIdx::from(self.min);
         let [stride_z, stride_y, stride_x] = self.strides();
         zero_idx_z as usize * stride_z

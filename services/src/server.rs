@@ -30,11 +30,24 @@ pub async fn start_server(static_files_dir: Option<PathBuf>) -> Result<()> {
     let web_config: config::Web = get_config_element()?;
 
     info!(
-        "Starting server… {}",
+        "Starting server… local address: {}, external address: {}",
+        Url::parse(&format!("http://{}/", web_config.bind_address))?,
         web_config
             .external_address
             .unwrap_or(Url::parse(&format!("http://{}/", web_config.bind_address))?)
     );
+
+    let session_config: crate::util::config::Session = get_config_element()?;
+
+    if session_config.anonymous_access {
+        info!("Anonymous access is enabled");
+    } else {
+        info!("Anonymous access is disabled");
+    }
+
+    if let Some(session_token) = session_config.fixed_session_token {
+        info!("Fixed session token is set, it is {session_token}");
+    }
 
     info!("Using in memory backend");
 
@@ -49,6 +62,8 @@ pub async fn start_server(static_files_dir: Option<PathBuf>) -> Result<()> {
     let ctx = InMemoryContext::new_with_data(
         data_path_config.dataset_defs_path,
         data_path_config.provider_defs_path,
+        data_path_config.layer_defs_path,
+        data_path_config.layer_collection_defs_path,
         tiling_spec,
         chunk_byte_size,
     )
@@ -87,11 +102,13 @@ where
             .wrap(middleware::NormalizePath::trim())
             .configure(configure_extractors)
             .configure(handlers::datasets::init_dataset_routes::<C>)
+            .configure(handlers::layers::init_layer_routes::<C>)
             .configure(handlers::plots::init_plot_routes::<C>)
             .configure(handlers::projects::init_project_routes::<C>)
             .configure(handlers::session::init_session_routes::<C>)
             .configure(handlers::spatial_references::init_spatial_reference_routes::<C>)
             .configure(handlers::upload::init_upload_routes::<C>)
+            .configure(handlers::tasks::init_task_routes::<C>)
             .configure(handlers::wcs::init_wcs_routes::<C>)
             .configure(handlers::wfs::init_wfs_routes::<C>)
             .configure(handlers::wms::init_wms_routes::<C>)
@@ -99,10 +116,13 @@ where
 
         #[cfg(feature = "ebv")]
         {
-            app = app
-                .service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>(None)));
+            app = app.service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>()));
         }
 
+        #[cfg(feature = "nfdi")]
+        {
+            app = app.configure(handlers::gfbio::init_gfbio_routes::<C>);
+        }
         if version_api {
             app = app.route("/version", web::get().to(show_version_handler));
         }

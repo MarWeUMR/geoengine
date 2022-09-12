@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::error::{self, Error};
 use crate::handlers::spatial_references::{spatial_reference_specification, AxisOrder};
 use crate::handlers::Context;
+use crate::ogc::util::{ogc_endpoint_url, OgcProtocol};
 use crate::ogc::wcs::request::{DescribeCoverage, GetCapabilities, GetCoverage, WcsRequest};
 use crate::util::config;
 use crate::util::config::get_config_element;
@@ -58,13 +59,12 @@ async fn wcs_handler<C: Context>(
 }
 
 fn wcs_url(workflow: WorkflowId) -> Result<Url> {
-    let base = crate::util::config::get_config_element::<crate::util::config::Web>()?
+    let web_config = crate::util::config::get_config_element::<crate::util::config::Web>()?;
+    let base = web_config
         .external_address
-        .ok_or(Error::ExternalAddressNotConfigured)?;
+        .unwrap_or(Url::parse(&format!("http://{}/", web_config.bind_address))?);
 
-    base.join("/wcs/")?
-        .join(&workflow.to_string())
-        .map_err(Into::into)
+    ogc_endpoint_url(&base, OgcProtocol::Wcs, workflow)
 }
 
 #[allow(clippy::unused_async)]
@@ -162,7 +162,7 @@ async fn describe_coverage<C: Context>(
 
     let wcs_url = wcs_url(identifiers)?;
 
-    let workflow = ctx.workflow_registry_ref().await.load(&identifiers).await?;
+    let workflow = ctx.workflow_registry_ref().load(&identifiers).await?;
 
     let exe_ctx = ctx.execution_context(session)?;
     let operator = workflow
@@ -288,7 +288,7 @@ async fn get_coverage<C: Context>(
         );
     }
 
-    let workflow = ctx.workflow_registry_ref().await.load(&identifier).await?;
+    let workflow = ctx.workflow_registry_ref().load(&identifier).await?;
 
     let operator = workflow.operator.get_raster().context(error::Operator)?;
 
@@ -306,6 +306,7 @@ async fn get_coverage<C: Context>(
     let workflow_spatial_ref = workflow_spatial_ref.ok_or(error::Error::InvalidSpatialReference)?;
 
     let request_spatial_ref: SpatialReference = request.gridbasecrs;
+    let request_no_data_value = request.nodatavalue;
 
     // perform reprojection if necessary
     let initialized = if request_spatial_ref == workflow_spatial_ref {
@@ -324,8 +325,6 @@ async fn get_coverage<C: Context>(
             .await
             .context(error::Operator)?
     };
-
-    let no_data_value: Option<f64> = initialized.result_descriptor().no_data_value;
 
     let processor = initialized.query_processor().context(error::Operator)?;
 
@@ -354,14 +353,16 @@ async fn get_coverage<C: Context>(
             query_rect,
             query_ctx,
             GdalGeoTiffDatasetMetadata {
-                no_data_value,
+                no_data_value: request_no_data_value,
                 spatial_reference: request_spatial_ref,
             },
             GdalGeoTiffOptions {
                 compression_num_threads: get_config_element::<crate::util::config::Gdal>()?.compression_num_threads,
                 as_cog: false,
+                force_big_tiff: false,
             },
             Some(get_config_element::<crate::util::config::Wcs>()?.tile_limit),
+            
         )
         .await)?
     .map_err(error::Error::from)?;
@@ -433,7 +434,7 @@ mod tests {
             xmlns:ogc="http://www.opengis.net/ogc"
             xmlns:ows="http://www.opengis.net/ows/1.1"
             xmlns:gml="http://www.opengis.net/gml"
-            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.opengis.net/wcs/1.1.1 http://localhost:3030/wcs/{workflow_id}/schemas/wcs/1.1.1/wcsGetCapabilities.xsd" updateSequence="152">
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.opengis.net/wcs/1.1.1 http://127.0.0.1:3030/wcs/{workflow_id}/schemas/wcs/1.1.1/wcsGetCapabilities.xsd" updateSequence="152">
             <ows:ServiceIdentification>
                 <ows:Title>Web Coverage Service</ows:Title>
                 <ows:ServiceType>WCS</ows:ServiceType>
@@ -448,21 +449,21 @@ mod tests {
                 <ows:Operation name="GetCapabilities">
                     <ows:DCP>
                         <ows:HTTP>
-                                <ows:Get xlink:href="http://localhost:3030/wcs/{workflow_id}?"/>
+                                <ows:Get xlink:href="http://127.0.0.1:3030/wcs/{workflow_id}?"/>
                         </ows:HTTP>
                     </ows:DCP>
                 </ows:Operation>
                 <ows:Operation name="DescribeCoverage">
                     <ows:DCP>
                         <ows:HTTP>
-                                <ows:Get xlink:href="http://localhost:3030/wcs/{workflow_id}?"/>
+                                <ows:Get xlink:href="http://127.0.0.1:3030/wcs/{workflow_id}?"/>
                         </ows:HTTP>
                     </ows:DCP>
                 </ows:Operation>
                 <ows:Operation name="GetCoverage">
                     <ows:DCP>
                         <ows:HTTP>
-                                <ows:Get xlink:href="http://localhost:3030/wcs/{workflow_id}?"/>
+                                <ows:Get xlink:href="http://127.0.0.1:3030/wcs/{workflow_id}?"/>
                         </ows:HTTP>
                     </ows:DCP>
                 </ows:Operation>
@@ -517,7 +518,7 @@ mod tests {
         xmlns:ogc="http://www.opengis.net/ogc"
         xmlns:ows="http://www.opengis.net/ows/1.1"
         xmlns:gml="http://www.opengis.net/gml"
-        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.opengis.net/wcs/1.1.1 http://localhost:3030/wcs/{workflow_id}/schemas/wcs/1.1.1/wcsDescribeCoverage.xsd">
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.opengis.net/wcs/1.1.1 http://127.0.0.1:3030/wcs/{workflow_id}/schemas/wcs/1.1.1/wcsDescribeCoverage.xsd">
         <wcs:CoverageDescription>
             <ows:Title>Workflow {workflow_id}</ows:Title>
             <wcs:Identifier>{workflow_id}</wcs:Identifier>
@@ -546,8 +547,10 @@ mod tests {
         );
     }
 
+    // TODO: add get_coverage with masked band
+
     #[tokio::test]
-    async fn get_coverage() {
+    async fn get_coverage_with_nodatavalue() {
         let exe_ctx_tiling_spec = TilingSpecification {
             origin_coordinate: (0., 0.).into(),
             tile_size_in_pixels: GridShape2D::new([600, 600]),
@@ -575,6 +578,7 @@ mod tests {
             ("gridorigin", "80,-10"),
             ("gridoffsets", "0.1,0.1"),
             ("time", "2014-01-01T00:00:00.0Z"),
+            ("nodatavalue", "0.0"),
         ];
 
         let req = test::TestRequest::get()
@@ -584,6 +588,7 @@ mod tests {
                 serde_urlencoded::to_string(params).unwrap()
             ))
             .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())));
+
         let res = send_test_request(req, ctx).await;
 
         assert_eq!(res.status(), 200);

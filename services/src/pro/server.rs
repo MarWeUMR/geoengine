@@ -14,7 +14,7 @@ use actix_files::Files;
 use actix_web::{http, middleware, web, App, HttpServer};
 #[cfg(feature = "postgres")]
 use bb8_postgres::tokio_postgres::NoTls;
-use log::info;
+use log::{info, warn};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use url::Url;
@@ -43,19 +43,33 @@ where
             .wrap(middleware::NormalizePath::trim())
             .configure(configure_extractors)
             .configure(handlers::datasets::init_dataset_routes::<C>)
+            .configure(handlers::layers::init_layer_routes::<C>)
             .configure(handlers::plots::init_plot_routes::<C>)
             .configure(pro::handlers::projects::init_project_routes::<C>)
             .configure(pro::handlers::users::init_user_routes::<C>)
             .configure(handlers::spatial_references::init_spatial_reference_routes::<C>)
             .configure(handlers::upload::init_upload_routes::<C>)
+            .configure(handlers::tasks::init_task_routes::<C>)
             .configure(handlers::wcs::init_wcs_routes::<C>)
             .configure(handlers::wfs::init_wfs_routes::<C>)
             .configure(handlers::wms::init_wms_routes::<C>)
             .configure(handlers::workflows::init_workflow_routes::<C>);
+
         #[cfg(feature = "odm")]
         {
             app = app.configure(pro::handlers::drone_mapping::init_drone_mapping_routes::<C>);
         }
+
+        #[cfg(feature = "ebv")]
+        {
+            app = app.service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>()));
+        }
+
+        #[cfg(feature = "nfdi")]
+        {
+            app = app.configure(handlers::gfbio::init_gfbio_routes::<C>);
+        }
+
         if version_api {
             app = app.route(
                 "/version",
@@ -89,24 +103,37 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
     let web_config: config::Web = get_config_element()?;
 
     info!(
-        "Starting server… {}",
+        "Starting server… local address: {}, external address: {}",
+        Url::parse(&format!("http://{}/", web_config.bind_address))?,
         web_config
             .external_address
             .unwrap_or(Url::parse(&format!("http://{}/", web_config.bind_address))?)
     );
 
+    let session_config: crate::util::config::Session = get_config_element()?;
     let user_config: crate::pro::util::config::User = get_config_element()?;
+    let oidc_config: crate::pro::util::config::Oidc = get_config_element()?;
 
-    if user_config.anonymous_access {
+    if session_config.anonymous_access {
         info!("Anonymous access is enabled");
     } else {
         info!("Anonymous access is disabled");
+    }
+
+    if session_config.fixed_session_token.is_some() {
+        warn!("Fixed session token is set, but it will be ignored in Geo Engine Pro");
     }
 
     if user_config.user_registration {
         info!("User registration is enabled");
     } else {
         info!("User registration is disabled");
+    }
+
+    if oidc_config.enabled {
+        info!("OIDC is enabled");
+    } else {
+        info!("OIDC is disabled");
     }
 
     let data_path_config: config::DataProvider = get_config_element()?;
@@ -123,8 +150,11 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
             let ctx = ProInMemoryContext::new_with_data(
                 data_path_config.dataset_defs_path,
                 data_path_config.provider_defs_path,
+                data_path_config.layer_defs_path,
+                data_path_config.layer_collection_defs_path,
                 tiling_spec,
                 chunk_byte_size,
+                oidc_config,
             )
             .await;
 
@@ -156,8 +186,11 @@ pub async fn start_pro_server(static_files_dir: Option<PathBuf>) -> Result<()> {
                     NoTls,
                     data_path_config.dataset_defs_path,
                     data_path_config.provider_defs_path,
+                    data_path_config.layer_defs_path,
+                    data_path_config.layer_collection_defs_path,
                     tiling_spec,
                     chunk_byte_size,
+                    oidc_config,
                 )
                 .await?;
 
