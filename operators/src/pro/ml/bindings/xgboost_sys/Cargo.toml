@@ -1,0 +1,16 @@
+[package]
+name = "xgboost_sys"
+version = "0.1.0"
+edition = "2021"
+links = "xgboost"
+build = "build.rs"
+
+[dependencies]
+libc = "*"
+
+[build-dependencies]
+bindgen = "*"
+cmake = "*"
+
+[lib]
+doctest = false # important because docstring tests fail with bindgen!
