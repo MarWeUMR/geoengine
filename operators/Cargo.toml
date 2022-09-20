@@ -48,6 +48,12 @@ tokio = { version = "1.15", features = ["macros", "signal", "sync", "rt-multi-th
 tracing = "0.1"
 typetag = "0.2"
 uuid = { version = "1.1", features = ["serde", "v4", "v5"] }
+# xgboost deps
+derive_builder = "0.11"
+indexmap = "1.0"
+libc = "0.2"
+ndarray="0.15.6"
+xgboost_sys = { path = "src/pro/ml/bindings/xgboost_sys" }
 
 [dev-dependencies]
 async-stream = "0.3"
