@@ -7,19 +7,22 @@ use std::path::{Path, PathBuf};
 
 fn main() {
 
-//         ╭──────────────────────────────────────────────────────────╮
-//         │           todo: build script in outdir setzen            │
-//         ╰──────────────────────────────────────────────────────────╯
     let out_dir = env::var_os("OUT_DIR").unwrap();
-    let fp = "xgboost/dmlc-core";
+    let od = out_dir.to_str().unwrap();
 
-    if !std::path::Path::new(fp).exists() {
+    let xg_include_path  = format!("{}/xgboost/include", od);
+    let xg_rabit_include_path  = format!("{}/xgboost/rabit/include", od);
+    let xg_dmlc_include_path  = format!("{}/xgboost/dmlc-core/include", od);
+    let clone_path  = format!("{}/xgboost", od);
+
+
+    if !std::path::Path::new(&xg_dmlc_include_path).exists() {
         std::process::Command::new("git")
-        .args(["clone", "--recursive", "https://github.com/dmlc/xgboost"])
+        .args(["clone", "--recursive", "https://github.com/dmlc/xgboost", &clone_path])
         .output()
         .expect("Failed to fetch git submodules!");
     }
-    
+
     let target = env::var("TARGET").unwrap();
 
     // CMake
@@ -29,20 +32,23 @@ fn main() {
         .build();
 
     // CONFIG BINDGEN
+
+
+
     let bindings = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_args(&["-x", "c++", "-std=c++11"])
         .clang_arg(format!(
             "-I{}",
-            Path::new(&String::from("xgboost/include")).display()
+            Path::new(&xg_include_path).display()
         ))
         .clang_arg(format!(
             "-I{}",
-            Path::new(&String::from("xgboost/rabit/include")).display()
+            Path::new(&xg_rabit_include_path).display()
         ))
         .clang_arg(format!(
             "-I{}",
-            Path::new(&String::from("xgboost/dmlc-core/include")).display()
+            Path::new(&xg_dmlc_include_path).display()
         ))
         .generate()
         .expect("Unable to generate bindings.");
