@@ -8,25 +8,31 @@ use std::path::{Path, PathBuf};
 fn main() {
 
     let out_dir = env::var_os("OUT_DIR").unwrap();
+    let target = env::var("TARGET").unwrap();
+    
     let od = out_dir.to_str().unwrap();
+    let od_pathbuf = PathBuf::from(od);
 
+    let cmake_path  = format!("{}/xgboost", od);
     let xg_include_path  = format!("{}/xgboost/include", od);
     let xg_rabit_include_path  = format!("{}/xgboost/rabit/include", od);
     let xg_dmlc_include_path  = format!("{}/xgboost/dmlc-core/include", od);
     let clone_path  = format!("{}/xgboost", od);
 
 
-    if !std::path::Path::new(&xg_dmlc_include_path).exists() {
+    if std::path::Path::new(&xg_dmlc_include_path).exists() == false {
+        println!("cloning xgboost repo into out_dir ...");
         std::process::Command::new("git")
-        .args(["clone", "--recursive", "https://github.com/dmlc/xgboost", &clone_path])
+        .args(["clone", "--recursive", "-b", "release_1.6.0", "https://github.com/dmlc/xgboost", &clone_path])
         .output()
         .expect("Failed to fetch git submodules!");
+    } else {
+        println!("Found xgboost repo.");
     }
 
-    let target = env::var("TARGET").unwrap();
 
     // CMake
-    let _ = Config::new("xgboost")
+    let _ = Config::new(cmake_path)
         .uses_cxx11()
         .define("BUILD_STATIC_LIB", "ON")
         .build();
@@ -54,9 +60,8 @@ fn main() {
         .expect("Unable to generate bindings.");
 
     // GENERATE THE BINDINGS
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
-        .write_to_file(out_path.join("bindings.rs"))
+        .write_to_file(od_pathbuf.join("bindings.rs"))
         .expect("Couldn't write bindings.");
 
     // link to appropriate C++ lib
@@ -69,9 +74,7 @@ fn main() {
     }
 
     // LINK STUFF (LINUX)
-    println!("cargo:rustc-link-search={}", out_path.join("lib").display());
+    println!("cargo:rustc-link-search={}", od_pathbuf.join("lib").display());
     println!("cargo:rustc-link-lib=xgboost");
     println!("cargo:rustc-link-lib=dmlc");
-    // println!("cargo:rustc-link-lib=stdc++");
-    // println!("cargo:rustc-link-lib=gomp");
 }

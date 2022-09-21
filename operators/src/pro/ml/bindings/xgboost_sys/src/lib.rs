@@ -12,7 +12,11 @@ mod tests {
 
     #[test]
     fn read_matrix() {
-        let dmat_train = "xgboost/demo/data/agaricus.txt.train";
+
+        let out_dir = env::var_os("OUT_DIR").unwrap();
+        let od = out_dir.to_str().unwrap();
+
+        let dmat_train = format!("{}/xgboost/demo/data/agaricus.txt.train", od);
 
         let silent = 0;
         let mut handle = std::ptr::null_mut();
