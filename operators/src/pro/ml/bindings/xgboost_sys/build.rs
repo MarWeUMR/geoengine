@@ -6,11 +6,20 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // std::process::Command::new("git")
-    //     .args(["clone", "--recursive", "https://github.com/dmlc/xgboost"])
-    //     .output()
-    //     .expect("Failed to fetch git submodules!");
 
+//         ╭──────────────────────────────────────────────────────────╮
+//         │           todo: build script in outdir setzen            │
+//         ╰──────────────────────────────────────────────────────────╯
+    let out_dir = env::var_os("OUT_DIR").unwrap();
+    let fp = "xgboost/dmlc-core";
+
+    if !std::path::Path::new(fp).exists() {
+        std::process::Command::new("git")
+        .args(["clone", "--recursive", "https://github.com/dmlc/xgboost"])
+        .output()
+        .expect("Failed to fetch git submodules!");
+    }
+    
     let target = env::var("TARGET").unwrap();
 
     // CMake
