@@ -1,11 +1,3 @@
-//! Rust wrapper around the [XGBoost](https://xgboost.ai) machine learning library.
-//!
-//! Provides a high level interface for training machine learning models using
-//! [gradient boosting](https://en.wikipedia.org/wiki/Gradient_boosting).
-//!
-//! Currently in the early stages of development, API is likely to be fairly unstable as new
-//! features are added.
-//!
 //! # Basic usage example
 //!
 //! ```

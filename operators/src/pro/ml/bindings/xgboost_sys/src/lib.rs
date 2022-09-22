@@ -12,15 +12,12 @@ mod tests {
 
     #[test]
     fn read_matrix() {
-
-        let out_dir = env::var_os("OUT_DIR").unwrap();
-        let od = out_dir.to_str().unwrap();
-
-        let dmat_train = format!("{}/xgboost/demo/data/agaricus.txt.train", od);
+        let out_dir = env!("OUT_DIR");
+        let dmat_train_path = format!("{}/xgboost/demo/data/agaricus.txt.train", out_dir);
 
         let silent = 0;
         let mut handle = std::ptr::null_mut();
-        let fname = std::ffi::CString::new(dmat_train).unwrap();
+        let fname = std::ffi::CString::new(dmat_train_path).unwrap();
         let ret_val = unsafe { XGDMatrixCreateFromFile(fname.as_ptr(), silent, &mut handle) };
         assert_eq!(ret_val, 0);
 
