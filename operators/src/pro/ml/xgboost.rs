@@ -45,7 +45,7 @@ pub struct InitializedXgboostOperator {
 }
 
 type PixelOut = f32;
-const OUT_NO_DATA_VALUE: PixelOut = PixelOut::NAN;
+// const OUT_NO_DATA_VALUE: PixelOut = PixelOut::NAN;
 
 #[typetag::serde]
 #[async_trait]
@@ -73,6 +73,7 @@ impl RasterOperator for XgboostOperator {
             data_type: RasterOut,
             time: None,
             bbox: None,
+            resolution: None,
             spatial_reference: in_desc.spatial_reference,
             measurement: Measurement::Classification(ClassificationMeasurement {
                 measurement: "raw".into(),
@@ -344,6 +345,7 @@ mod tests {
                 result_descriptor: RasterResultDescriptor {
                     time: None,
                     bbox: None,
+                    resolution: None,
                     data_type: RasterDataType::I16,
                     spatial_reference: SpatialReferenceOption::SpatialReference(
                         SpatialReference::new(SpatialReferenceAuthority::Epsg, 32632),
@@ -476,6 +478,7 @@ mod tests {
                     result_descriptor: RasterResultDescriptor {
                         time: None,
                         bbox: None,
+                        resolution: None,
                         data_type: RasterDataType::I16,
                         spatial_reference: SpatialReference::new(
                             SpatialReferenceAuthority::Epsg,
