@@ -10,9 +10,9 @@ use std::{ffi, fmt, fs::File, ptr, slice};
 use tempfile;
 use xgboost_sys;
 
-use crate::pro::ml::bindings::XGBError;
 use crate::pro::ml::bindings::error::XGBResult;
 use crate::pro::ml::bindings::parameters::{BoosterParameters, TrainingParameters};
+use crate::pro::ml::bindings::XGBError;
 
 use super::DMatrix;
 
@@ -46,7 +46,7 @@ impl PredictOption {
     }
 }
 
-/// Core model in XGBoost, containing functions for training, evaluating and predicting.
+/// Core model in `XGBoost`, containing functions for training, evaluating and predicting.
 ///
 /// Usually created through the [`train`](struct.Booster.html#method.train) function, which
 /// creates and trains a Booster in a single call.
@@ -93,9 +93,9 @@ impl Booster {
         Ok(booster)
     }
 
-    /// Create a new Booster model with given parameters and list of DMatrix to cache.
+    /// Create a new booster model with given parameters and list of `DMatrix` to cache.
     ///
-    /// Cached DMatrix can sometimes be used internally by XGBoost to speed up certain operations.
+    /// Cached `DMatrix` can sometimes be used internally by `XGBoost` to speed up certain operations.
     pub fn new_with_cached_dmats(
         params: &BoosterParameters,
         dmats: &[&DMatrix],
@@ -115,13 +115,22 @@ impl Booster {
     }
 
     /// Save this Booster as a binary file at given path.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the model saving fails with an error not coming from `XGBoost`.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> XGBResult<()> {
         debug!("Writing Booster to: {}", path.as_ref().display());
         let fname = ffi::CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
         xgb_call!(xgboost_sys::XGBoosterSaveModel(self.handle, fname.as_ptr()))
     }
 
-    /// Load a Booster from a binary file at given path.
+    /// Load a `Booster` from a binary file at given path.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the model couldn't be loaded, because of an error not coming from `XGBoost`.
+    /// Could also panic, if a `Booster` couldn't be created because of an error not coming from `XGBoost`.
     pub fn load<P: AsRef<Path>>(path: P) -> XGBResult<Self> {
         debug!("Loading Booster from: {}", path.as_ref().display());
 
@@ -148,37 +157,36 @@ impl Booster {
         xgb_call!(xgboost_sys::XGBoosterCreate(ptr::null(), 0, &mut handle))?;
         xgb_call!(xgboost_sys::XGBoosterLoadModelFromBuffer(
             handle,
-            bytes.as_ptr() as *const _,
+            bytes.as_ptr().cast(),
             bytes.len() as u64
         ))?;
         Ok(Booster { handle })
     }
 
+    /// Trains the model incrementally.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if `XGBoost` fails to load the number of processes from `Rabit`.
     pub fn train_increment(params: &TrainingParameters, model_name: &str) -> XGBResult<Self> {
-        let cached_dmats = {
-            let mut dmats = vec![params.dtrain];
-            if let Some(eval_sets) = params.evaluation_sets {
-                for (dmat, _) in eval_sets {
-                    dmats.push(*dmat);
-                }
+        let mut dmats = vec![params.dtrain];
+        if let Some(eval_sets) = params.evaluation_sets {
+            for (dmat, _) in eval_sets {
+                dmats.push(*dmat);
             }
-            dmats
-        };
+        }
 
         let path = Path::new(model_name);
         let bytes = std::fs::read(&path).expect("read saved booster file");
         let mut bst = Booster::load_buffer(&bytes[..]).expect("load booster from buffer");
-        // let mut bst = Booster::new_with_cached_dmats(&params.booster_params, &cached_dmats)?;
-        //let num_parallel_tree = 1;
 
         // load distributed code checkpoint from rabit
         let version = bst.load_rabit_checkpoint()?;
         debug!("Loaded Rabit checkpoint: version={}", version);
         assert!(unsafe { xgboost_sys::RabitGetWorldSize() != 1 || version == 0 });
 
-        let _rank = unsafe { xgboost_sys::RabitGetRank() };
+        unsafe { xgboost_sys::RabitGetRank() };
         let start_iteration = version / 2;
-        //let mut nboost = start_iteration;
 
         for i in start_iteration..params.boost_rounds as i32 {
             // distributed code: need to resume to this point
@@ -212,7 +220,7 @@ impl Booster {
                         let eval_results = dmat_eval_results
                             .entry(eval_name.to_string())
                             .or_insert_with(IndexMap::new);
-                        eval_results.insert(dmat_name.to_string(), eval_result);
+                        eval_results.insert(String::from(*dmat_name), eval_result);
                     }
                 }
 
@@ -261,7 +269,7 @@ impl Booster {
                 let mut length: u64 = 0;
                 let mut buffer_string = ptr::null();
 
-                let _ = xgb_call!(xgboost_sys::XGBoosterSerializeToBuffer(
+                xgb_call!(xgboost_sys::XGBoosterSerializeToBuffer(
                     booster.handle,
                     &mut length,
                     &mut buffer_string
@@ -280,7 +288,7 @@ impl Booster {
 
                 let mut bst_unserialize = Booster { handle: bst_handle };
 
-                let _ = xgb_call!(xgboost_sys::XGBoosterUnserializeFromBuffer(
+                xgb_call!(xgboost_sys::XGBoosterUnserializeFromBuffer(
                     bst_unserialize.handle,
                     buffer_string as *mut ffi::c_void,
                     length,
@@ -775,9 +783,7 @@ impl Booster {
             let name = ffi::CString::new(k).unwrap();
             let value = ffi::CString::new(v).unwrap();
 
-            let setting_ok = unsafe {
-                xgboost_sys::XGBoosterSetParam(self.handle, name.as_ptr(), value.as_ptr())
-            };
+            unsafe { xgboost_sys::XGBoosterSetParam(self.handle, name.as_ptr(), value.as_ptr()) };
         }
 
         // for (k, v) in zip(keys, values) {
@@ -950,7 +956,8 @@ mod tests {
     use crate::pro::ml::bindings::parameters::{self, learning, tree};
 
     fn read_train_matrix() -> XGBResult<DMatrix> {
-        DMatrix::load("data.csv?format=csv")
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        DMatrix::load(format!("{}/data.csv?format=csv", data_path))
     }
 
     fn load_test_booster() -> Booster {
@@ -960,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn set_booster_param() {
+    fn set_booster_parhm() {
         let mut booster = load_test_booster();
         let res = booster.set_param("key", "value");
         assert!(res.is_ok());
@@ -991,7 +998,8 @@ mod tests {
 
     #[test]
     fn save_and_load_from_buffer() {
-        let dmat_train = DMatrix::load("agaricus.txt.train").unwrap();
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        let dmat_train = DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
         let mut booster =
             Booster::new_with_cached_dmats(&BoosterParameters::default(), &[&dmat_train]).unwrap();
         let attr = booster
@@ -1051,8 +1059,9 @@ mod tests {
 
     #[test]
     fn predict() {
-        let dmat_train = DMatrix::load("agaricus.txt.train?format=libsvm").unwrap();
-        let dmat_test = DMatrix::load("agaricus.txt.test?format=libsvm").unwrap();
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        let dmat_train = DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
+        let dmat_test = DMatrix::load(format!("{}/agaricus.txt.test?format=libsvm", data_path)).unwrap();
 
         let tree_params = tree::TreeBoosterParametersBuilder::default()
             .max_depth(2)
@@ -1081,7 +1090,6 @@ mod tests {
             booster.update(&dmat_train, i).expect("update failed");
         }
 
-        println!("ping");
 
         let eps = 1e-6;
 
@@ -2294,7 +2302,7 @@ mod tests {
             100,
             9,
             -1,
-            f64::NAN
+            f64::NAN,
         )
         .unwrap();
 
@@ -2560,7 +2568,7 @@ mod tests {
             20,
             9,
             -1,
-            f64::NAN
+            f64::NAN,
         )
         .unwrap();
 

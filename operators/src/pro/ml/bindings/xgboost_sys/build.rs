@@ -17,7 +17,7 @@ fn main() {
     let xg_dmlc_include_path = format!("{}/xgboost/dmlc-core/include", out_dir);
     let clone_path = format!("{}/xgboost", out_dir);
 
-    if std::path::Path::new(&xg_dmlc_include_path).exists() == false {
+    if !std::path::Path::new(&xg_dmlc_include_path).exists() {
         // we need to get the source code
         std::process::Command::new("git")
             .args([

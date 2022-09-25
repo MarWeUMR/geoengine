@@ -7,13 +7,13 @@ use std::{ffi, path::Path, ptr, slice};
 
 use crate::pro::ml::bindings::error::{XGBError, XGBResult};
 
-static KEY_GROUP_PTR: &'static str = "group_ptr";
-static KEY_GROUP: &'static str = "group";
-static KEY_LABEL: &'static str = "label";
-static KEY_WEIGHT: &'static str = "weight";
-static KEY_BASE_MARGIN: &'static str = "base_margin";
+static KEY_GROUP_PTR: &str = "group_ptr";
+static KEY_GROUP: &str = "group";
+static KEY_LABEL: &str = "label";
+static KEY_WEIGHT: &str = "weight";
+static KEY_BASE_MARGIN: &str = "base_margin";
 
-/// Data matrix used throughout XGBoost for training/predicting [`Booster`](struct.Booster.html) models.
+/// Data matrix used throughout `XGBoost` for training/predicting [`Booster`](struct.Booster.html) models.
 ///
 /// It's used as a container for both features (i.e. a row for every instance), and an optional true label for that
 /// instance (as an `f32` value).
@@ -79,7 +79,7 @@ unsafe impl Send for DMatrix {}
 unsafe impl Sync for DMatrix {}
 
 impl DMatrix {
-    /// Construct a new instance from a DMatrixHandle created by the XGBoost C API.
+    /// Construct a new instance from a `DMatrixHandle` created by the `XGBoost` C API.
     fn new(handle: xgboost_sys::DMatrixHandle) -> XGBResult<Self> {
         // number of rows/cols are frequently read throughout applications, so more convenient to pull them out once
         // when the matrix is created, instead of having to check errors each time XGDMatrixNum* is called
@@ -99,6 +99,10 @@ impl DMatrix {
     }
 
     /// Create a new `DMatrix` from slice in column-major order.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the matrix creation fails with an error that doesn't come from `XGBoost`.
     pub fn from_col_major_f64(
         data: &[f64],
         byte_size_ax_0: usize,
@@ -141,7 +145,7 @@ impl DMatrix {
             json_config_cstr.as_ptr(),
             &mut handle
         ))?;
-        Ok(DMatrix::new(handle)?)
+        Ok(DMatrix::new(handle).unwrap())
     }
 
     /// Create a new `DMatrix` from dense array in row-major order.
@@ -160,6 +164,11 @@ impl DMatrix {
     /// let num_rows = 3;
     /// let dmat = DMatrix::from_dense(data, num_rows).unwrap();
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the matrix creation fails with an error not coming from `XGBoost`.
+
     pub fn from_dense(data: &[f32], num_rows: usize) -> XGBResult<Self> {
         let mut handle = ptr::null_mut();
         xgb_call!(xgboost_sys::XGDMatrixCreateFromMat(
@@ -169,7 +178,7 @@ impl DMatrix {
             0.0, // TODO: can values be missing here?
             &mut handle
         ))?;
-        Ok(DMatrix::new(handle)?)
+        Ok(DMatrix::new(handle).unwrap())
     }
 
     /// Create a new `DMatrix` from a sparse
@@ -180,6 +189,10 @@ impl DMatrix {
     /// `data[indptr[i]:indptr[i+1]`.
     ///
     /// If `num_cols` is set to None, number of columns will be inferred from given data.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the matrix creation fails with an error not coming from `XGBoost`.
     pub fn from_csr(
         indptr: &[usize],
         indices: &[usize],
@@ -200,7 +213,7 @@ impl DMatrix {
             num_cols.try_into().unwrap(),
             &mut handle
         ))?;
-        Ok(DMatrix::new(handle)?)
+        Ok(DMatrix::new(handle).unwrap())
     }
 
     /// Create a new `DMatrix` from a sparse
@@ -211,6 +224,10 @@ impl DMatrix {
     /// `data[indptr[i]:indptr[i+1]`.
     ///
     /// If `num_rows` is set to None, number of rows will be inferred from given data.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the matrix creation fails with an error not coming from `XGBoost`.
     pub fn from_csc(
         indptr: &[usize],
         indices: &[usize],
@@ -231,16 +248,16 @@ impl DMatrix {
             num_rows.try_into().unwrap(),
             &mut handle
         ))?;
-        Ok(DMatrix::new(handle)?)
+        Ok(DMatrix::new(handle).unwrap())
     }
 
     /// Create a new `DMatrix` from given file.
     ///
     /// Supports text files in [LIBSVM](https://www.csie.ntu.edu.tw/~cjlin/libsvm/) format, CSV,
-    /// binary files written either by `save`, or from another XGBoost library.
+    /// binary files written either by `save`, or from another `XGBoost` library.
     ///
     /// For more details on accepted formats, seem the
-    /// [XGBoost input format](https://xgboost.readthedocs.io/en/latest/tutorials/input_format.html)
+    /// [`XGBoost` input format](https://xgboost.readthedocs.io/en/latest/tutorials/input_format.html)
     /// documentation.
     ///
     /// # LIBSVM format
@@ -256,6 +273,10 @@ impl DMatrix {
     /// 1 9:1 11:0.375 15:1
     /// 0 1:0 8:0.22 11:1
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the matrix creation fails with an error not coming from `XGBoost`.
     pub fn load<P: AsRef<Path>>(path: P) -> XGBResult<Self> {
         let path_as_string = path.as_ref().display().to_string();
         let path_as_bytes = Path::new(&path_as_string).as_os_str().as_bytes();
@@ -265,21 +286,24 @@ impl DMatrix {
         let silent = true;
         xgb_call!(xgboost_sys::XGDMatrixCreateFromFile(
             path_cstr.as_ptr(),
-            silent as i32,
+            i32::from(silent),
             &mut handle
         ))?;
-        Ok(DMatrix::new(handle)?)
+        Ok(DMatrix::new(handle).unwrap())
     }
 
     /// Serialise this `DMatrix` as a binary file to given path.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the matrix saving fails with an error not coming from `XGBoost`.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> XGBResult<()> {
-        dbg!("Writing DMatrix to: {}", path.as_ref().display());
         let fname = ffi::CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
         let silent = true;
         xgb_call!(xgboost_sys::XGDMatrixSaveBinary(
             self.handle,
             fname.as_ptr(),
-            silent as i32
+            i32::from(silent)
         ))
     }
 
@@ -298,9 +322,12 @@ impl DMatrix {
         (self.num_rows(), self.num_cols())
     }
 
-    /// Get a new DMatrix as a containing only given indices.
+    /// Get a new `DMatrix` as a containing only given indices.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the slice creation fails with an error not coming from `XGBoost`.
     pub fn slice(&self, indices: &[usize]) -> XGBResult<DMatrix> {
-        dbg!("Slicing {} rows from DMatrix", indices.len());
         let mut out_handle = ptr::null_mut();
         let indices: Vec<i32> = indices.iter().map(|x| *x as i32).collect();
         xgb_call!(xgboost_sys::XGDMatrixSliceDMatrix(
@@ -309,7 +336,7 @@ impl DMatrix {
             indices.len() as xgboost_sys::bst_ulong,
             &mut out_handle
         ))?;
-        Ok(DMatrix::new(out_handle)?)
+        Ok(DMatrix::new(out_handle).unwrap())
     }
 
     /// Get ground truth labels for each row of this matrix.
@@ -348,7 +375,7 @@ impl DMatrix {
     ///
     /// Needed when the learning task is ranking.
     ///
-    /// See the XGBoost documentation for more information.
+    /// See the `XGBoost` documentation for more information.
     pub fn set_group(&mut self, group: &[u32]) -> XGBResult<()> {
         // same as xgb_call!(xgboost_sys::XGDMatrixSetGroup(self.handle, group.as_ptr(), group.len() as u64))
         self.set_uint_info(KEY_GROUP, group)
@@ -358,7 +385,7 @@ impl DMatrix {
     ///
     /// Needed when the learning task is ranking.
     ///
-    /// See the XGBoost documentation for more information.
+    /// See the `XGBoost` documentation for more information.
     pub fn get_group(&self) -> XGBResult<&[u32]> {
         self.get_uint_info(KEY_GROUP_PTR)
     }
