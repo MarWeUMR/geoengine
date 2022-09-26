@@ -1,4 +1,4 @@
-//! BoosterParameters for configuring linear boosters.
+//! `BoosterParameters` for configuring linear boosters.
 
 use std::default::Default;
 
@@ -25,10 +25,12 @@ impl ToString for LinearUpdate {
 }
 
 impl Default for LinearUpdate {
-    fn default() -> Self { LinearUpdate::Shotgun }
+    fn default() -> Self {
+        LinearUpdate::Shotgun
+    }
 }
 
-/// BoosterParameters for Linear Booster.
+/// `BoosterParameters` for Linear Booster.
 #[derive(Builder, Clone)]
 #[builder(default)]
 pub struct LinearBoosterParameters {
@@ -50,16 +52,14 @@ pub struct LinearBoosterParameters {
     updater: LinearUpdate,
 }
 
-
 impl LinearBoosterParameters {
     pub(crate) fn as_string_pairs(&self) -> Vec<(String, String)> {
-        let mut v = Vec::new();
-
-        v.push(("booster".to_owned(), "gblinear".to_owned()));
-
-        v.push(("lambda".to_owned(), self.lambda.to_string()));
-        v.push(("alpha".to_owned(), self.alpha.to_string()));
-        v.push(("updater".to_owned(), self.updater.to_string()));
+        let v = vec![
+            ("booster".to_owned(), "gblinear".to_owned()),
+            ("lambda".to_owned(), self.lambda.to_string()),
+            ("alpha".to_owned(), self.alpha.to_string()),
+            ("updater".to_owned(), self.updater.to_string()),
+        ];
 
         v
     }

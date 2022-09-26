@@ -1,4 +1,4 @@
-//! BoosterParameters for configuring learning objectives and evaluation metrics for all
+//! `BoosterParameters` for configuring learning objectives and evaluation metrics for all
 //! booster types.
 
 use std;
@@ -9,6 +9,7 @@ use derive_builder::Builder;
 use super::Interval;
 
 /// Learning objective used when training a booster model.
+#[derive(Copy, Clone)]
 pub enum Objective {
     /// Linear regression.
     RegLinear,
@@ -74,12 +75,6 @@ pub enum Objective {
     RegTweedie(Option<f32>),
 }
 
-impl Copy for Objective {}
-
-impl Clone for Objective {
-    fn clone(&self) -> Self { *self }
-}
-
 impl ToString for Objective {
     fn to_string(&self) -> String {
         match *self {
@@ -121,10 +116,10 @@ pub enum Metrics {
 #[derive(Clone)]
 pub enum EvaluationMetric {
     /// Root Mean Square Error.
-    RMSE,
+    Rmse,
 
     /// Mean Absolute Error.
-    MAE,
+    Mae,
 
     /// Negative log-likelihood.
     LogLoss,
@@ -142,33 +137,33 @@ pub enum EvaluationMetric {
     MultiClassLogLoss,
 
     /// Area under the curve for ranking evaluation.
-    AUC,
+    Auc,
 
     /// Normalized Discounted Cumulative Gain.
-    NDCG,
+    Ndcg,
 
     /// NDCG with top N positions cut off.
-    NDCGCut(u32),
+    NdcgCut(u32),
 
     /// NDCG with scores of lists without any positive samples evaluated as 0 instead of 1.
-    NDCGNegative,
+    NdcgNegative,
 
     /// NDCG with scores of lists without any positive samples evaluated as 0 instead of 1, and top
     /// N positions cut off.
-    NDCGCutNegative(u32),
+    NdcgCutNegative(u32),
 
     /// Mean average precision.
-    MAP,
+    Map,
 
     /// MAP with top N positions cut off.
-    MAPCut(u32),
+    MapCut(u32),
 
     /// MAP with scores of lists without any positive samples evaluated as 0 instead of 1.
-    MAPNegative,
+    MapNegative,
 
     /// MAP with scores of lists without any positive samples evaluated as 0 instead of 1, and top
     /// N positions cut off.
-    MAPCutNegative(u32),
+    MapCutNegative(u32),
 
     /// Negative log likelihood for Poisson regression.
     PoissonLogLoss,
@@ -189,8 +184,8 @@ pub enum EvaluationMetric {
 impl ToString for EvaluationMetric {
     fn to_string(&self) -> String {
         match *self {
-            EvaluationMetric::RMSE => "rmse".to_owned(),
-            EvaluationMetric::MAE => "mae".to_owned(),
+            EvaluationMetric::Rmse => "rmse".to_owned(),
+            EvaluationMetric::Mae => "mae".to_owned(),
             EvaluationMetric::LogLoss => "logloss".to_owned(),
             EvaluationMetric::BinaryErrorRate(t) => {
                 if (t - 0.5).abs() < std::f32::EPSILON {
@@ -201,15 +196,15 @@ impl ToString for EvaluationMetric {
             },
             EvaluationMetric::MultiClassErrorRate => "merror".to_owned(),
             EvaluationMetric::MultiClassLogLoss   => "mlogloss".to_owned(),
-            EvaluationMetric::AUC                 => "auc".to_owned(),
-            EvaluationMetric::NDCG                => "ndcg".to_owned(),
-            EvaluationMetric::NDCGCut(n)          => format!("ndcg@{}", n),
-            EvaluationMetric::NDCGNegative        => "ndcg-".to_owned(),
-            EvaluationMetric::NDCGCutNegative(n)  => format!("ndcg@{}-", n),
-            EvaluationMetric::MAP                 => "map".to_owned(),
-            EvaluationMetric::MAPCut(n)           => format!("map@{}", n),
-            EvaluationMetric::MAPNegative         => "map-".to_owned(),
-            EvaluationMetric::MAPCutNegative(n)   => format!("map@{}-", n),
+            EvaluationMetric::Auc                 => "auc".to_owned(),
+            EvaluationMetric::Ndcg                => "ndcg".to_owned(),
+            EvaluationMetric::NdcgCut(n)          => format!("ndcg@{}", n),
+            EvaluationMetric::NdcgNegative        => "ndcg-".to_owned(),
+            EvaluationMetric::NdcgCutNegative(n)  => format!("ndcg@{}-", n),
+            EvaluationMetric::Map                 => "map".to_owned(),
+            EvaluationMetric::MapCut(n)           => format!("map@{}", n),
+            EvaluationMetric::MapNegative         => "map-".to_owned(),
+            EvaluationMetric::MapCutNegative(n)   => format!("map@{}-", n),
             EvaluationMetric::PoissonLogLoss      => "poisson-nloglik".to_owned(),
             EvaluationMetric::GammaLogLoss        => "gamma-nloglik".to_owned(),
             EvaluationMetric::CoxLogLoss          => "cox-nloglik".to_owned(),
@@ -219,7 +214,7 @@ impl ToString for EvaluationMetric {
     }
 }
 
-/// BoosterParameters that configure the learning objective.
+/// `BoosterParameters` that configure the learning objective.
 ///
 /// See [`LearningTaskParametersBuilder`](struct.LearningTaskParametersBuilder.html), for details
 /// on parameters.

@@ -297,8 +297,7 @@ impl Booster {
                 bst_unserialize.set_param_from_json(config);
                 bst_unserialize
             } else {
-                let bst = Booster::new_with_json_config(&cached_dmats, config)?;
-                bst
+                Booster::new_with_json_config(&cached_dmats, config)?
             }
         };
 
@@ -332,20 +331,13 @@ impl Booster {
         Ok(bst)
     }
 
+    /// Saves the config as a json file.
+    ///
+    /// # Panics
+    /// 
+    /// Will panic, if the config cant be created, because of an error not coming from `XGBoost`.
     pub fn save_config(&self) -> String {
-        /*
-        json_string = ctypes.c_char_p()
-        length = c_bst_ulong()
-        _check_call(_LIB.XGBoosterSaveJsonConfig(
-            self.handle,
-            ctypes.byref(length),
-            ctypes.byref(json_string)))
-        assert json_string.value is not None
-        result = json_string.value.decode()  # pylint: disable=no-member
-        return result
-        */
 
-        // let json_string: libc::c_char =
         let mut length: u64 = 1;
         let mut json_string = ptr::null();
 
@@ -361,7 +353,7 @@ impl Booster {
         };
 
         println!("{}", json);
-        println!("{}", out.clone());
+        println!("{}", out);
         out
     }
 
@@ -376,7 +368,7 @@ impl Booster {
 
     /// Update this model by training it for one round with given training matrix.
     ///
-    /// Uses XGBoost's objective function that was specificed in this Booster's learning objective parameters.
+    /// Uses `XGBoost`'s objective function that was specificed in this Booster's learning objective parameters.
     ///
     /// * `dtrain` - matrix to train the model with for a single iteration
     /// * `iteration` - current iteration number
@@ -395,7 +387,7 @@ impl Booster {
         objective_fn: CustomObjective,
     ) -> XGBResult<()> {
         let pred = self.predict(dtrain)?;
-        let (gradient, hessian) = objective_fn(&pred.to_vec(), dtrain);
+        let (gradient, hessian) = objective_fn(&pred, dtrain);
         self.boost(dtrain, &gradient, &hessian)
     }
 
@@ -475,21 +467,29 @@ impl Booster {
 
     /// Evaluate given matrix against this model using metrics defined in this model's parameters.
     ///
-    /// See parameter::learning::EvaluationMetric for a full list.
+    /// See `parameter::learning::EvaluationMetric` for a full list.
     ///
     /// Returns a map of evaluation metric name to score.
-    pub fn evaluate(&self, dmat: &DMatrix) -> XGBResult<HashMap<String, f32>> {
-        let name = "default";
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the given matrix cannot be evaluated with the given metric.
+    pub fn evaluate(&self, dmat: &DMatrix, name: &str) -> XGBResult<HashMap<String, f32>> {
         let mut eval = self.eval_set(&[(dmat, name)], 0)?;
         let mut result = HashMap::new();
         eval.remove(name).unwrap().into_iter().for_each(|(k, v)| {
-            result.insert(k.to_owned(), v);
+            result.insert(k, v);
         });
 
         Ok(result)
     }
 
     /// Get a string attribute that was previously set for this model.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the attribute can't be retrieved, or the key can't be represented 
+    /// as a `CString`.
     pub fn get_attribute(&self, key: &str) -> XGBResult<Option<String>> {
         let key = ffi::CString::new(key).unwrap();
         let mut out_buf = ptr::null();
@@ -511,6 +511,10 @@ impl Booster {
     }
 
     /// Store a string attribute in this model with given key.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the attribute can't be set by `XGBoost`.
     pub fn set_attribute(&mut self, key: &str, value: &str) -> XGBResult<()> {
         let key = ffi::CString::new(key).unwrap();
         let value = ffi::CString::new(value).unwrap();
@@ -522,6 +526,10 @@ impl Booster {
     }
 
     /// Get names of all attributes stored in this model. Values can then be fetched with calls to `get_attribute`.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the attribtue name cannot be retrieved from `XGBoost`.
     pub fn get_attribute_names(&self) -> XGBResult<Vec<String>> {
         let mut out_len = 0;
         let mut out = ptr::null_mut();
@@ -539,13 +547,18 @@ impl Booster {
         Ok(out_vec)
     }
 
+    /// This method calculates the predicions from a given matrix.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if `XGBoost` cannot make predictions.
     pub fn predict_from_dmat(
         &self,
         dmat: &DMatrix,
         out_shape: &[u64; 2],
         out_dim: &mut u64,
     ) -> XGBResult<Vec<f32>> {
-        let json_config = format!("{{\"type\": 0,\"training\": false,\"iteration_begin\": 0,\"iteration_end\": 0,\"strict_shape\": true}}");
+        let json_config = "{\"type\": 0,\"training\": false,\"iteration_begin\": 0,\"iteration_end\": 0,\"strict_shape\": true}".to_string();
 
         let mut out_result = ptr::null();
 
@@ -570,6 +583,11 @@ impl Booster {
     /// Predict results for given data.
     ///
     /// Returns an array containing one entry per row in the given data.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the predictions aren't possible for `XGBoost` or the results cannot be
+    /// parsed.
     pub fn predict(&self, dmat: &DMatrix) -> XGBResult<Vec<f32>> {
         let option_mask = PredictOption::options_as_mask(&[]);
         let ntree_limit = 0;
@@ -593,6 +611,11 @@ impl Booster {
     /// Predict margin for given data.
     ///
     /// Returns an array containing one entry per row in the given data.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the predictions aren't possible for `XGBoost` or the results cannot be
+    /// parsed.
     pub fn predict_margin(&self, dmat: &DMatrix) -> XGBResult<Vec<f32>> {
         let option_mask = PredictOption::options_as_mask(&[PredictOption::OutputMargin]);
         let ntree_limit = 0;
@@ -614,9 +637,14 @@ impl Booster {
 
     /// Get predicted leaf index for each sample in given data.
     ///
-    /// Returns an array of shape (number of samples, number of trees) as tuple of (data, num_rows).
+    /// Returns an array of shape (number of samples, number of trees) as tuple of (data, `num_rows`).
     ///
     /// Note: the leaf index of a tree is unique per tree, so e.g. leaf 1 could be found in both tree 1 and tree 0.
+    ///
+    /// # Panics 
+    ///
+    /// Will panic, if the prediction of a leave isn't possible for `XGBoost` or the data cannot be
+    /// parsed.
     pub fn predict_leaf(&self, dmat: &DMatrix) -> XGBResult<(Vec<f32>, (usize, usize))> {
         let option_mask = PredictOption::options_as_mask(&[PredictOption::PredictLeaf]);
         let ntree_limit = 0;
@@ -645,7 +673,11 @@ impl Booster {
     /// prediction.
     ///
     /// Returns an array of shape (number of samples, number of features + 1) as a tuple of
-    /// (data, num_rows). The final column contains the bias term.
+    /// (data, `num_rows`). The final column contains the bias term.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if `XGBoost` cannot predict the data or parse the result.
     pub fn predict_contributions(&self, dmat: &DMatrix) -> XGBResult<(Vec<f32>, (usize, usize))> {
         let option_mask = PredictOption::options_as_mask(&[PredictOption::PredictContribitions]);
         let ntree_limit = 0;
@@ -676,6 +708,10 @@ impl Booster {
     ///
     /// Returns an array of shape (number of samples, number of features + 1, number of features + 1).
     /// The final row and column contain the bias terms.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if `XGBoost` cannot predict the data or parse the result.
     pub fn predict_interactions(
         &self,
         dmat: &DMatrix,
@@ -749,7 +785,7 @@ impl Booster {
         xgb_call!(xgboost_sys::XGBoosterDumpModelEx(
             self.handle,
             fmap.as_ptr(),
-            with_statistics as i32,
+            i32::from(with_statistics),
             format.as_ptr(),
             &mut out_len,
             &mut out_dump_array
@@ -778,22 +814,18 @@ impl Booster {
         xgb_call!(xgboost_sys::XGBoosterSaveRabitCheckpoint(self.handle))
     }
 
+    /// Sets the parameters for `XGBoost` from a json file.
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if `XGBoost` cannot set the values.
     fn set_param_from_json(&mut self, config: HashMap<&str, &str>) {
-        for (k, v) in config.into_iter() {
+        for (k, v) in config {
             let name = ffi::CString::new(k).unwrap();
             let value = ffi::CString::new(v).unwrap();
 
             unsafe { xgboost_sys::XGBoosterSetParam(self.handle, name.as_ptr(), value.as_ptr()) };
         }
-
-        // for (k, v) in zip(keys, values) {
-        //     let name = ffi::CString::new(k).unwrap();
-        //     let value = ffi::CString::new(v).unwrap();
-        //
-        //     let setting_ok = unsafe {
-        //         xgboost_sys::XGBoosterSetParam(self.handle, name.as_ptr(), value.as_ptr())
-        //     };
-        // }
     }
 
     fn set_param(&mut self, name: &str, value: &str) -> XGBResult<()> {
@@ -822,7 +854,7 @@ impl Booster {
                     });
 
                     let metric_map = result
-                        .entry(evname.to_string())
+                        .entry(String::from(*evname))
                         .or_insert_with(IndexMap::new);
                     metric_map.insert(metric.to_owned(), score);
                 }
@@ -842,7 +874,7 @@ impl Drop for Booster {
 
 /// Maps a feature index to a name and type, used when dumping models as text.
 ///
-/// See [dump_model](struct.Booster.html#method.dump_model) for usage.
+/// See [`dump_model`](struct.Booster.html#method.dump_model) for usage.
 pub struct FeatureMap(BTreeMap<u32, (String, FeatureType)>);
 
 impl FeatureMap {
@@ -865,6 +897,10 @@ impl FeatureMap {
     /// 2   is-parent?=no   i
     /// 3   income  int
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Will panic, if the given `FeatureMap` file cannot be loaded.
     pub fn from_file<P: AsRef<Path>>(path: P) -> io::Result<FeatureMap> {
         let file = File::open(path)?;
         let mut features: FeatureMap = FeatureMap(BTreeMap::new());
@@ -893,8 +929,8 @@ impl FeatureMap {
                 }
             };
 
-            let feature_name = &parts[1];
-            let feature_type = match FeatureType::from_str(&parts[2]) {
+            let feature_name = parts[1];
+            let feature_type = match FeatureType::from_str(parts[2]) {
                 Ok(feature_type) => feature_type,
                 Err(msg) => {
                     let msg = format!("Unable to parse features from line {}: {}", i + 1, msg);
@@ -1071,7 +1107,7 @@ mod tests {
         let learning_params = learning::LearningTaskParametersBuilder::default()
             .objective(learning::Objective::BinaryLogistic)
             .eval_metrics(learning::Metrics::Custom(vec![
-                learning::EvaluationMetric::MAPCutNegative(4),
+                learning::EvaluationMetric::MapCutNegative(4),
                 learning::EvaluationMetric::LogLoss,
                 learning::EvaluationMetric::BinaryErrorRate(0.5),
             ]))
@@ -1093,11 +1129,11 @@ mod tests {
 
         let eps = 1e-6;
 
-        let train_metrics = booster.evaluate(&dmat_train).unwrap();
+        let train_metrics = booster.evaluate(&dmat_train, "default").unwrap();
         assert!(*train_metrics.get("logloss").unwrap() - 0.006634 < eps);
         assert!(*train_metrics.get("map@4-").unwrap() - 0.001274 < eps);
 
-        let test_metrics = booster.evaluate(&dmat_test).unwrap();
+        let test_metrics = booster.evaluate(&dmat_test, "default").unwrap();
         assert!(*test_metrics.get("logloss").unwrap() - 0.00692 < eps);
         assert!(*test_metrics.get("map@4-").unwrap() - 0.005155 < eps);
 

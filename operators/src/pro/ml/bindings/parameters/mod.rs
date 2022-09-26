@@ -1,7 +1,7 @@
 //! Builders for parameters that control various aspects of training.
 //!
 //! Configuration is based on the documented
-//! [XGBoost Parameters](https://xgboost.readthedocs.io/en/latest/parameter.html), see those for
+//! [`XGBoost` Parameters](https://xgboost.readthedocs.io/en/latest/parameter.html), see those for
 //! more details.
 //!
 //! Parameters are generally created through builders that provide sensible defaults, and ensure that
@@ -23,7 +23,7 @@ use super::booster::CustomObjective;
 
 /// Parameters for training boosters.
 /// Created using [`BoosterParametersBuilder`](struct.BoosterParametersBuilder.html).
-#[derive(Builder, Clone)]
+#[derive(Builder, Clone, Default)]
 #[builder(default)]
 pub struct BoosterParameters {
     /// Type of booster (tree, linear or DART) along with its parameters.
@@ -45,16 +45,6 @@ pub struct BoosterParameters {
     threads: Option<u32>,
 }
 
-impl Default for BoosterParameters {
-    fn default() -> Self {
-        BoosterParameters {
-            booster_type: booster::BoosterType::default(),
-            learning_params: learning::LearningTaskParameters::default(),
-            verbose: false,
-            threads: None,
-        }
-    }
-}
 
 impl BoosterParameters {
     /// Get type of booster (tree, linear or DART) along with its parameters.
@@ -82,21 +72,21 @@ impl BoosterParameters {
         self.verbose
     }
 
-    /// Set to `true` to enable verbose output from XGBoost's C library.
+    /// Set to `true` to enable verbose output from `XGBoost`'s C library.
     pub fn set_verbose(&mut self, verbose: bool) {
         self.verbose = verbose;
     }
 
-    /// Get number of parallel threads XGboost will use (if compiled with multiprocessing support).
+    /// Get number of parallel threads `XGBoost` will use (if compiled with multiprocessing support).
     ///
-    /// If `None`, XGBoost will determine the number of threads to use automatically.
+    /// If `None`, `XGBoost` will determine the number of threads to use automatically.
     pub fn threads(&self) -> &Option<u32> {
         &self.threads
     }
 
-    /// Set number of parallel threads XGBoost will use (if compiled with multiprocessing support).
+    /// Set number of parallel threads `XGBoost` will use (if compiled with multiprocessing support).
     ///
-    /// If `None`, XGBoost will determine the number of threads to use automatically.
+    /// If `None`, `XGBoost` will determine the number of threads to use automatically.
     pub fn set_threads<T: Into<Option<u32>>>(&mut self, threads: T) {
         self.threads = threads.into();
     }
@@ -107,7 +97,7 @@ impl BoosterParameters {
         v.extend(self.booster_type.as_string_pairs());
         v.extend(self.learning_params.as_string_pairs());
 
-        v.push(("silent".to_owned(), (!self.verbose as u8).to_string()));
+        v.push(("silent".to_owned(), (u8::from(!self.verbose)).to_string()));
 
         if let Some(nthread) = self.threads {
             v.push(("nthread".to_owned(), nthread.to_string()));

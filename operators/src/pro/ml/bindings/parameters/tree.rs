@@ -1,4 +1,4 @@
-//! BoosterParameters for controlling tree boosters.
+//! `BoosterParameters` for controlling tree boosters.
 //!
 //!
 use std::default::Default;
@@ -7,7 +7,7 @@ use derive_builder::Builder;
 
 use super::Interval;
 
-/// The tree construction algorithm used in XGBoost (see description in the
+/// The tree construction algorithm used in `XGBoost` (see description in the
 /// [reference paper](http://arxiv.org/abs/1603.02754)).
 ///
 /// Distributed and external memory version only support approximate algorithm.
@@ -52,32 +52,29 @@ impl ToString for TreeMethod {
 }
 
 impl Default for TreeMethod {
-    fn default() -> Self { TreeMethod::Auto }
-}
-
-impl From<String> for TreeMethod
-{
-    fn from(s: String) -> Self
-    {
-      use std::borrow::Borrow;
-      Self::from(s.borrow())
+    fn default() -> Self {
+        TreeMethod::Auto
     }
 }
 
-impl<'a> From<&'a str> for TreeMethod
-{
-    fn from(s: &'a str) -> Self
-    {
-      match s
-      {
-        "auto" => TreeMethod::Auto,
-        "exact" => TreeMethod::Exact,
-        "approx" => TreeMethod::Approx,
-        "hist" => TreeMethod::Hist,
-        "gpu_exact" => TreeMethod::GpuExact,
-        "gpu_hist" => TreeMethod::GpuHist,
-        _ => panic!("no known tree_method for {}", s)
-      }
+impl From<String> for TreeMethod {
+    fn from(s: String) -> Self {
+        use std::borrow::Borrow;
+        Self::from(s.borrow())
+    }
+}
+
+impl<'a> From<&'a str> for TreeMethod {
+    fn from(s: &'a str) -> Self {
+        match s {
+            "auto" => TreeMethod::Auto,
+            "exact" => TreeMethod::Exact,
+            "approx" => TreeMethod::Approx,
+            "hist" => TreeMethod::Hist,
+            "gpu_exact" => TreeMethod::GpuExact,
+            "gpu_hist" => TreeMethod::GpuHist,
+            _ => panic!("no known tree_method for {}", s),
+        }
     }
 }
 
@@ -151,7 +148,9 @@ impl ToString for ProcessType {
 }
 
 impl Default for ProcessType {
-    fn default() -> Self { ProcessType::Default }
+    fn default() -> Self {
+        ProcessType::Default
+    }
 }
 
 /// Controls the way new nodes are added to the tree.
@@ -174,7 +173,9 @@ impl ToString for GrowPolicy {
 }
 
 impl Default for GrowPolicy {
-    fn default() -> Self { GrowPolicy::Depthwise }
+    fn default() -> Self {
+        GrowPolicy::Depthwise
+    }
 }
 
 /// The type of predictor algorithm to use. Provides the same results but allows the use of GPU or CPU.
@@ -197,10 +198,12 @@ impl ToString for Predictor {
 }
 
 impl Default for Predictor {
-    fn default() -> Self { Predictor::Cpu }
+    fn default() -> Self {
+        Predictor::Cpu
+    }
 }
 
-/// BoosterParameters for Tree Booster. Create using
+/// `BoosterParameters` for Tree Booster. Create using
 /// [`TreeBoosterParametersBuilder`](struct.TreeBoosterParametersBuilder.html).
 #[derive(Builder, Clone)]
 #[builder(build_fn(validate = "Self::validate"))]
@@ -376,39 +379,65 @@ impl Default for TreeBoosterParameters {
 
 impl TreeBoosterParameters {
     pub(crate) fn as_string_pairs(&self) -> Vec<(String, String)> {
-        let mut v = Vec::new();
-
-        v.push(("booster".to_owned(), "gbtree".to_owned()));
-
-        v.push(("eta".to_owned(), self.eta.to_string()));
-        v.push(("gamma".to_owned(), self.gamma.to_string()));
-        v.push(("max_depth".to_owned(), self.max_depth.to_string()));
-        v.push(("min_child_weight".to_owned(), self.min_child_weight.to_string()));
-        v.push(("max_delta_step".to_owned(), self.max_delta_step.to_string()));
-        v.push(("subsample".to_owned(), self.subsample.to_string()));
-        v.push(("colsample_bytree".to_owned(), self.colsample_bytree.to_string()));
-        v.push(("colsample_bylevel".to_owned(), self.colsample_bylevel.to_string()));
-        v.push(("colsample_bynode".to_owned(), self.colsample_bynode.to_string()));
-        v.push(("lambda".to_owned(), self.lambda.to_string()));
-        v.push(("alpha".to_owned(), self.alpha.to_string()));
-        v.push(("tree_method".to_owned(), self.tree_method.to_string()));
-        v.push(("sketch_eps".to_owned(), self.sketch_eps.to_string()));
-        v.push(("scale_pos_weight".to_owned(), self.scale_pos_weight.to_string()));
-        v.push(("refresh_leaf".to_owned(), (self.refresh_leaf as u8).to_string()));
-        v.push(("process_type".to_owned(), self.process_type.to_string()));
-        v.push(("grow_policy".to_owned(), self.grow_policy.to_string()));
-        v.push(("max_leaves".to_owned(), self.max_leaves.to_string()));
-        v.push(("max_bin".to_owned(), self.max_bin.to_string()));
-        v.push(("num_parallel_tree".to_owned(), self.num_parallel_tree.to_string()));
-        v.push(("predictor".to_owned(), self.predictor.to_string()));
+        let mut v = vec![
+            ("booster".to_owned(), "gbtree".to_owned()),
+            ("eta".to_owned(), self.eta.to_string()),
+            ("gamma".to_owned(), self.gamma.to_string()),
+            ("max_depth".to_owned(), self.max_depth.to_string()),
+            (
+                "min_child_weight".to_owned(),
+                self.min_child_weight.to_string(),
+            ),
+            ("max_delta_step".to_owned(), self.max_delta_step.to_string()),
+            ("subsample".to_owned(), self.subsample.to_string()),
+            (
+                "colsample_bytree".to_owned(),
+                self.colsample_bytree.to_string(),
+            ),
+            (
+                "colsample_bylevel".to_owned(),
+                self.colsample_bylevel.to_string(),
+            ),
+            (
+                "colsample_bynode".to_owned(),
+                self.colsample_bynode.to_string(),
+            ),
+            ("lambda".to_owned(), self.lambda.to_string()),
+            ("alpha".to_owned(), self.alpha.to_string()),
+            ("tree_method".to_owned(), self.tree_method.to_string()),
+            ("sketch_eps".to_owned(), self.sketch_eps.to_string()),
+            (
+                "scale_pos_weight".to_owned(),
+                self.scale_pos_weight.to_string(),
+            ),
+            (
+                "refresh_leaf".to_owned(),
+                (u8::from(self.refresh_leaf)).to_string(),
+            ),
+            ("process_type".to_owned(), self.process_type.to_string()),
+            ("grow_policy".to_owned(), self.grow_policy.to_string()),
+            ("max_leaves".to_owned(), self.max_leaves.to_string()),
+            ("max_bin".to_owned(), self.max_bin.to_string()),
+            (
+                "num_parallel_tree".to_owned(),
+                self.num_parallel_tree.to_string(),
+            ),
+            ("predictor".to_owned(), self.predictor.to_string()),
+        ];
 
         // Don't pass anything to XGBoost if the user didn't specify anything.
         // This allows XGBoost to figure it out on it's own, and suppresses the
         // warning message during training.
         // See: https://github.com/davechallis/rust-xgboost/issues/7
-        if self.updater.len() != 0
-        {
-          v.push(("updater".to_owned(), self.updater.iter().map(|u| u.to_string()).collect::<Vec<String>>().join(",")));
+        if !self.updater.is_empty() {
+            v.push((
+                "updater".to_owned(),
+                self.updater
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<String>>()
+                    .join(","),
+            ));
         }
 
         v
@@ -420,7 +449,8 @@ impl TreeBoosterParametersBuilder {
         Interval::new_closed_closed(0.0, 1.0).validate(&self.eta, "eta")?;
         Interval::new_open_closed(0.0, 1.0).validate(&self.subsample, "subsample")?;
         Interval::new_open_closed(0.0, 1.0).validate(&self.colsample_bytree, "colsample_bytree")?;
-        Interval::new_open_closed(0.0, 1.0).validate(&self.colsample_bylevel, "colsample_bylevel")?;
+        Interval::new_open_closed(0.0, 1.0)
+            .validate(&self.colsample_bylevel, "colsample_bylevel")?;
         Interval::new_open_closed(0.0, 1.0).validate(&self.colsample_bynode, "colsample_bynode")?;
         Interval::new_open_open(0.0, 1.0).validate(&self.sketch_eps, "sketch_eps")?;
         Ok(())

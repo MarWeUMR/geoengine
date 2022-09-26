@@ -1,4 +1,4 @@
-//! BoosterParameters for specifying the type of booster that is used when training a model.
+//! `BoosterParameters` for specifying the type of booster that is used when training a model.
 //!
 //! # Example
 //!
