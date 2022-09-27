@@ -6,20 +6,21 @@
 //!
 //! Parameters are generally created through builders that provide sensible defaults, and ensure that
 //! any given settings are valid when built.
+use std::cmp::Ordering;
 use std::default::Default;
 use std::fmt::{self, Display};
 
-pub mod tree;
 pub mod learning;
 pub mod linear;
+pub mod tree;
 // pub mod dart;
 pub mod booster;
 
 use derive_builder::Builder;
 
-use crate::pro::ml::bindings::dmatrix::DMatrix;
 pub use self::booster::BoosterType;
 use super::booster::CustomObjective;
+use crate::pro::ml::bindings::dmatrix::DMatrix;
 
 /// Parameters for training boosters.
 /// Created using [`BoosterParametersBuilder`](struct.BoosterParametersBuilder.html).
@@ -45,7 +46,6 @@ pub struct BoosterParameters {
     threads: Option<u32>,
 }
 
-
 impl BoosterParameters {
     /// Get type of booster (tree, linear or DART) along with its parameters.
     pub fn booster_type(&self) -> &booster::BoosterType {
@@ -63,7 +63,10 @@ impl BoosterParameters {
     }
 
     /// Set configuration for the learning objective.
-    pub fn set_learning_params<T: Into<learning::LearningTaskParameters>>(&mut self, learning_params: T) {
+    pub fn set_learning_params<T: Into<learning::LearningTaskParameters>>(
+        &mut self,
+        learning_params: T,
+    ) {
         self.learning_params = learning_params.into();
     }
 
@@ -119,41 +122,41 @@ pub struct TrainingParameters<'a> {
     /// Number of boosting rounds to use during training.
     ///
     /// *default*: `10`
-    #[builder(default="10")]
+    #[builder(default = "10")]
     pub(crate) boost_rounds: u32,
 
     /// Configuration for the booster model that will be trained.
     ///
     /// *default*: `BoosterParameters::default()`
-    #[builder(default="BoosterParameters::default()")]
+    #[builder(default = "BoosterParameters::default()")]
     pub(crate) booster_params: BoosterParameters,
 
-    #[builder(default="None")]
+    #[builder(default = "None")]
     /// Optional list of DMatrix to evaluate against after each boosting round.
     ///
     /// Supplied as a list of tuples of (DMatrix, description). The description is used to differentiate between
     /// different evaluation datasets when output during training.
     ///
     /// *default*: `None`
-    pub(crate) evaluation_sets: Option<&'a[(&'a DMatrix, &'a str)]>,
+    pub(crate) evaluation_sets: Option<&'a [(&'a DMatrix, &'a str)]>,
 
     /// Optional custom objective function to use for training.
     ///
     /// *default*: `None`
-    #[builder(default="None")]
+    #[builder(default = "None")]
     pub(crate) custom_objective_fn: Option<CustomObjective>,
 
     /// Optional custom evaluation function to use during training.
     ///
     /// *default*: `None`
-    #[builder(default="None")]
+    #[builder(default = "None")]
     pub(crate) custom_evaluation_fn: Option<CustomEvaluation>,
     // TODO: callbacks
 }
 
-impl <'a> TrainingParameters<'a> {
+impl<'a> TrainingParameters<'a> {
     pub fn dtrain(&self) -> &'a DMatrix {
-        &self.dtrain
+        self.dtrain
     }
 
     pub fn set_dtrain(&mut self, dtrain: &'a DMatrix) {
@@ -176,11 +179,11 @@ impl <'a> TrainingParameters<'a> {
         self.booster_params = booster_params.into();
     }
 
-    pub fn evaluation_sets(&self) -> &Option<&'a[(&'a DMatrix, &'a str)]> {
-        &self.evaluation_sets
+    pub fn evaluation_sets(&self) -> Option<&'a [(&'a DMatrix, &'a str)]> {
+        self.evaluation_sets
     }
 
-    pub fn set_evaluation_sets(&mut self, evaluation_sets: Option<&'a[(&'a DMatrix, &'a str)]>) {
+    pub fn set_evaluation_sets(&mut self, evaluation_sets: Option<&'a [(&'a DMatrix, &'a str)]>) {
         self.evaluation_sets = evaluation_sets;
     }
 
@@ -217,11 +220,11 @@ impl<T: Display> Display for Interval<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let lower = match self.min_inclusion {
             Inclusion::Closed => '[',
-            Inclusion::Open   => '(',
+            Inclusion::Open => '(',
         };
         let upper = match self.max_inclusion {
             Inclusion::Closed => ']',
-            Inclusion::Open   => ')',
+            Inclusion::Open => ')',
         };
         write!(f, "{}{}, {}{}", lower, self.min, self.max, upper)
     }
@@ -229,7 +232,12 @@ impl<T: Display> Display for Interval<T> {
 
 impl<T: PartialOrd + Display> Interval<T> {
     fn new(min: T, min_inclusion: Inclusion, max: T, max_inclusion: Inclusion) -> Self {
-        Interval { min, min_inclusion, max, max_inclusion }
+        Interval {
+            min,
+            min_inclusion,
+            max,
+            max_inclusion,
+        }
     }
 
     fn new_open_open(min: T, max: T) -> Self {
@@ -245,27 +253,44 @@ impl<T: PartialOrd + Display> Interval<T> {
     }
 
     fn contains(&self, val: &T) -> bool {
-        match self.min_inclusion {
-            Inclusion::Closed => if !(val >= &self.min) { return false; },
-            Inclusion::Open => if !(val > &self.min) { return false; },
-        }
-        match self.max_inclusion {
-            Inclusion::Closed => if !(val <= &self.max) { return false; },
-            Inclusion::Open => if !(val < &self.max) { return false; },
-        }
-        true
+        let min = match self.min_inclusion {
+            Inclusion::Closed => {
+                matches!(val.partial_cmp(&self.min), None | Some(Ordering::Less))
+            }
+            Inclusion::Open => {
+                matches!(
+                    val.partial_cmp(&self.min),
+                    None | Some(Ordering::Less | Ordering::Equal)
+                )
+            }
+        };
+
+        let max = match self.max_inclusion {
+            Inclusion::Closed => {
+                matches!(val.partial_cmp(&self.min), None | Some(Ordering::Greater))
+            }
+            Inclusion::Open => matches!(
+                val.partial_cmp(&self.min),
+                None | Some(Ordering::Greater | Ordering::Equal)
+            ),
+        };
+
+        min & max
     }
 
     fn validate(&self, val: &Option<T>, name: &str) -> Result<(), String> {
         match val {
             Some(ref val) => {
-                if self.contains(&val) {
+                if self.contains(val) {
                     Ok(())
                 } else {
-                    Err(format!("Invalid value for '{}' parameter, {} is not in range {}.", name, &val, self))
+                    Err(format!(
+                        "Invalid value for '{}' parameter, {} is not in range {}.",
+                        name, &val, self
+                    ))
                 }
-            },
-            None => Ok(())
+            }
+            None => Ok(()),
         }
     }
 }

@@ -449,8 +449,10 @@ mod tests {
     use super::*;
     use tempfile;
     fn read_train_matrix() -> XGBResult<DMatrix> {
+
         println!("loading mat");
-        DMatrix::load("data.csv?format=csv")
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        DMatrix::load(format!("{}/data.csv?format=csv", data_path))
     }
 
     #[test]
@@ -460,12 +462,12 @@ mod tests {
 
     #[test]
     fn read_num_rows() {
-        assert_eq!(read_train_matrix().unwrap().num_rows(), 150);
+        assert_eq!(read_train_matrix().unwrap().num_rows(), 23946);
     }
 
     #[test]
     fn read_num_cols() {
-        assert_eq!(read_train_matrix().unwrap().num_cols(), 5);
+        assert_eq!(read_train_matrix().unwrap().num_cols(), 6);
     }
 
     #[test]
@@ -486,7 +488,7 @@ mod tests {
     #[test]
     fn get_set_labels() {
         let mut dmat = read_train_matrix().unwrap();
-        assert_eq!(dmat.get_labels().unwrap().len(), 150);
+        assert_eq!(dmat.get_labels().unwrap().len(), 23946);
         let labels = vec![0.0; dmat.get_labels().unwrap().len()];
         assert!(dmat.set_labels(&labels).is_ok());
         assert_eq!(dmat.get_labels().unwrap(), labels);

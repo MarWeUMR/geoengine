@@ -56,7 +56,7 @@ impl RasterOperator for XgboostOperator {
     ) -> Result<Box<dyn InitializedRasterOperator>> {
         println!("initializing raster sources");
         let self_source = self.sources.clone();
-         let rasters = self_source.rasters;
+        let rasters = self_source.rasters;
 
         let init_rasters = future::try_join_all(
             rasters
@@ -326,7 +326,7 @@ mod tests {
     use geoengine_datatypes::util::Identifier;
     use geoengine_datatypes::{hashmap, test_data};
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{XgboostOperator, XgboostParams};
 
@@ -497,18 +497,11 @@ mod tests {
     #[tokio::test]
     async fn xg_op_test() {
         // setup data to predict
-        // let paths = vec![
-        //     "s2_10m_de_marburg/b02.tiff",
-        //     "s2_10m_de_marburg/b03.tiff",
-        //     "s2_10m_de_marburg/b04.tiff",
-        //     "s2_10m_de_marburg/b08.tiff",
-        // ];
-
         let paths = vec![
-            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b02_2020-08-01_0__36days_mean_de_marburg.tiff",
-            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b03_2020-08-01_0__36days_mean_de_marburg.tiff",
-            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b04_2020-08-01_0__36days_mean_de_marburg.tiff",
-            "/Users/marcus/programming/rust/geoengine/test_data/s2_10m_de_marburg/s2_b08_2020-08-01_0__36days_mean_de_marburg.tiff",
+            "s2_10m_de_marburg/b02.tiff",
+            "s2_10m_de_marburg/b03.tiff",
+            "s2_10m_de_marburg/b04.tiff",
+            "s2_10m_de_marburg/b08.tiff",
         ];
 
         // setup context and meta data
@@ -544,13 +537,14 @@ mod tests {
         // this operator prepares the input data
         let srcs = get_src(gcm.clone()).await;
 
-        let work_dir = std::env::current_dir().unwrap();
-        let model_path = work_dir.join("model.json").display().to_string();
+        let project_path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+
+        let model_path = project_path.join("test_data/s2_10m_de_marburg/model.json");
 
         // xg-operator takes the input data for further processing
         let xg = XgboostOperator {
             params: XgboostParams {
-                model_file_path: model_path,
+                model_file_path: String::from(model_path.to_str().unwrap()),
             },
             sources: MultipleRasterSources { rasters: srcs },
         };

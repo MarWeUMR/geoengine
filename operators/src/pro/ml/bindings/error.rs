@@ -21,8 +21,7 @@ impl XGBError {
         XGBError { desc: desc.into() }
     }
 
-    /// Check the return value from an `XGBoost` FFI call, and return the last error message on
-    /// error.
+    /// Check the return value from an `XGBoost` FFI call, and return the last error message on error.
     ///
     /// Return values of 0 are treated as success, returns values of -1 are treated as errors.
     ///

@@ -56,6 +56,7 @@ extern crate indexmap;
 macro_rules! xgb_call {
     ($x:expr) => {
         XGBError::check_return_value(unsafe { $x })
+        
     };
 }
 

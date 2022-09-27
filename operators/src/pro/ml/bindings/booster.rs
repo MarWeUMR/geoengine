@@ -273,7 +273,7 @@ impl Booster {
                     booster.handle,
                     &mut length,
                     &mut buffer_string
-                ));
+                )).expect("couldn't serialize to buffer!");
 
                 let mut bst_handle = ptr::null_mut();
 
@@ -292,7 +292,7 @@ impl Booster {
                     bst_unserialize.handle,
                     buffer_string as *mut ffi::c_void,
                     length,
-                ));
+                )).expect("couldn't unserialize from buffer!");
 
                 bst_unserialize.set_param_from_json(config);
                 bst_unserialize
@@ -334,10 +334,9 @@ impl Booster {
     /// Saves the config as a json file.
     ///
     /// # Panics
-    /// 
+    ///
     /// Will panic, if the config cant be created, because of an error not coming from `XGBoost`.
     pub fn save_config(&self) -> String {
-
         let mut length: u64 = 1;
         let mut json_string = ptr::null();
 
@@ -488,7 +487,7 @@ impl Booster {
     ///
     /// # Panics
     ///
-    /// Will panic, if the attribute can't be retrieved, or the key can't be represented 
+    /// Will panic, if the attribute can't be retrieved, or the key can't be represented
     /// as a `CString`.
     pub fn get_attribute(&self, key: &str) -> XGBResult<Option<String>> {
         let key = ffi::CString::new(key).unwrap();
@@ -641,7 +640,7 @@ impl Booster {
     ///
     /// Note: the leaf index of a tree is unique per tree, so e.g. leaf 1 could be found in both tree 1 and tree 0.
     ///
-    /// # Panics 
+    /// # Panics
     ///
     /// Will panic, if the prediction of a leave isn't possible for `XGBoost` or the data cannot be
     /// parsed.
@@ -1035,7 +1034,8 @@ mod tests {
     #[test]
     fn save_and_load_from_buffer() {
         let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
-        let dmat_train = DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
+        let dmat_train =
+            DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
         let mut booster =
             Booster::new_with_cached_dmats(&BoosterParameters::default(), &[&dmat_train]).unwrap();
         let attr = booster
@@ -1096,8 +1096,10 @@ mod tests {
     #[test]
     fn predict() {
         let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
-        let dmat_train = DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
-        let dmat_test = DMatrix::load(format!("{}/agaricus.txt.test?format=libsvm", data_path)).unwrap();
+        let dmat_train =
+            DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
+        let dmat_test =
+            DMatrix::load(format!("{}/agaricus.txt.test?format=libsvm", data_path)).unwrap();
 
         let tree_params = tree::TreeBoosterParametersBuilder::default()
             .max_depth(2)
@@ -1125,7 +1127,6 @@ mod tests {
         for i in 0..10 {
             booster.update(&dmat_train, i).expect("update failed");
         }
-
 
         let eps = 1e-6;
 
@@ -1181,8 +1182,11 @@ mod tests {
 
     #[test]
     fn predict_leaf() {
-        let dmat_train = DMatrix::load("agaricus.txt.train").unwrap();
-        let dmat_test = DMatrix::load("agaricus.txt.test").unwrap();
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        let dmat_train =
+            DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
+        let dmat_test =
+            DMatrix::load(format!("{}/agaricus.txt.test?format=libsvm", data_path)).unwrap();
 
         let tree_params = tree::TreeBoosterParametersBuilder::default()
             .max_depth(2)
@@ -1217,8 +1221,11 @@ mod tests {
 
     #[test]
     fn predict_contributions() {
-        let dmat_train = DMatrix::load("agaricus.txt.train").unwrap();
-        let dmat_test = DMatrix::load("agaricus.txt.test").unwrap();
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        let dmat_train =
+            DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
+        let dmat_test =
+            DMatrix::load(format!("{}/agaricus.txt.test?format=libsvm", data_path)).unwrap();
 
         let tree_params = tree::TreeBoosterParametersBuilder::default()
             .max_depth(2)
@@ -1254,8 +1261,12 @@ mod tests {
 
     #[test]
     fn predict_interactions() {
-        let dmat_train = DMatrix::load("agaricus.txt.train").unwrap();
-        let dmat_test = DMatrix::load("agaricus.txt.test").unwrap();
+        let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/pro/ml/bindings");
+        let dmat_train =
+            DMatrix::load(format!("{}/agaricus.txt.train?format=libsvm", data_path)).unwrap();
+        let dmat_test =
+            DMatrix::load(format!("{}/agaricus.txt.test?format=libsvm", data_path)).unwrap();
+
 
         let tree_params = tree::TreeBoosterParametersBuilder::default()
             .max_depth(2)
