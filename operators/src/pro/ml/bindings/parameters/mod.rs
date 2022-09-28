@@ -255,24 +255,24 @@ impl<T: PartialOrd + Display> Interval<T> {
     fn contains(&self, val: &T) -> bool {
         let min = match self.min_inclusion {
             Inclusion::Closed => {
-                matches!(val.partial_cmp(&self.min), None | Some(Ordering::Less))
-            }
-            Inclusion::Open => {
                 matches!(
                     val.partial_cmp(&self.min),
-                    None | Some(Ordering::Less | Ordering::Equal)
+                    Some(Ordering::Equal | Ordering::Greater)
                 )
+            }
+            Inclusion::Open => {
+                matches!(val.partial_cmp(&self.min), Some(Ordering::Greater))
             }
         };
 
         let max = match self.max_inclusion {
             Inclusion::Closed => {
-                matches!(val.partial_cmp(&self.min), None | Some(Ordering::Greater))
+                matches!(
+                    val.partial_cmp(&self.max),
+                    Some(Ordering::Equal | Ordering::Less)
+                )
             }
-            Inclusion::Open => matches!(
-                val.partial_cmp(&self.min),
-                None | Some(Ordering::Greater | Ordering::Equal)
-            ),
+            Inclusion::Open => matches!(val.partial_cmp(&self.max), Some(Ordering::Less)),
         };
 
         min & max
