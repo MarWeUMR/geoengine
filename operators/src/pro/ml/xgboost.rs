@@ -20,7 +20,6 @@ use crate::engine::{
     QueryProcessor, RasterOperator, RasterQueryProcessor, RasterResultDescriptor,
     TypedRasterQueryProcessor,
 };
-// use crate::pro::ml::bindings::{booster::Booster, dmatrix::DMatrix};
 use crate::util::stream_zip::StreamVectorZip;
 use crate::util::Result;
 use futures::stream::BoxStream;
@@ -45,7 +44,6 @@ pub struct InitializedXgboostOperator {
 }
 
 type PixelOut = f32;
-// const OUT_NO_DATA_VALUE: PixelOut = PixelOut::NAN;
 
 #[typetag::serde]
 #[async_trait]
@@ -54,7 +52,6 @@ impl RasterOperator for XgboostOperator {
         self: Box<Self>,
         context: &dyn ExecutionContext,
     ) -> Result<Box<dyn InitializedRasterOperator>> {
-        println!("initializing raster sources");
         let self_source = self.sources.clone();
         let rasters = self_source.rasters;
 
@@ -245,14 +242,11 @@ fn process_tile(
                 let mut out_dim: u64 = 0;
                 let bst = Booster::load_buffer(model_file).unwrap();
                 // measure time for prediction
-                //let start = Instant::now();
                 let result = bst.predict_from_dmat(
                     &xg_matrix,
                     &[n_parallel_pixels as u64, n_bands as u64],
                     &mut out_dim,
                 );
-                //let end = start.elapsed();
-                //println!("prediction time: {:?}", end);
                 result.unwrap()
             })
             .flatten_iter()
@@ -407,7 +401,6 @@ mod tests {
             params: GdalSourceParameters { data: id.clone() },
         });
 
-        // let gcm = get_gdal_config_metadata();
 
         mc.add_meta_data(id, Box::new(gcm.clone()));
 
