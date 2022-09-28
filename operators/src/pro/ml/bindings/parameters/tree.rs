@@ -459,13 +459,15 @@ impl TreeBoosterParametersBuilder {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
     fn tree_params() {
+        let error_margin = f32::EPSILON;
         let p = TreeBoosterParameters::default();
-        assert_eq!(p.eta, 0.3);
+        assert!((p.eta - 0.3).abs() < error_margin);
         let p = TreeBoosterParametersBuilder::default().build().unwrap();
-        assert_eq!(p.eta, 0.3);
+        assert!((p.eta - 0.3).abs() < error_margin);
     }
 }

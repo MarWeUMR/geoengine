@@ -496,13 +496,16 @@ mod tests {
 
     #[test]
     fn get_set_weights() {
+        let error_margin = f32::EPSILON;
         let mut dmat = read_train_matrix().unwrap();
         let empty_weights: Vec<f32> = vec![];
         assert_eq!(dmat.get_weights().unwrap(), empty_weights.as_slice());
 
         let weight = [1.0, 10.0, 44.9555];
         assert!(dmat.set_weights(&weight).is_ok());
-        assert_eq!(dmat.get_weights().unwrap(), weight);
+        dmat.get_weights().unwrap().iter().zip(weight.iter()).for_each(|(a, b)| {
+            assert!((a - b).abs() < error_margin);
+        });
     }
 
     #[test]
