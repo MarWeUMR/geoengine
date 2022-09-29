@@ -93,7 +93,6 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
     }
 
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
-        println!("typing rasters");
 
         let vec_of_rqps = self
             .sources
@@ -144,7 +143,6 @@ where
         bands_of_tile: Vec<Result<Tile<P>, crate::error::Error>>,
         pool: Arc<ThreadPool>,
     ) -> Result<RasterTile2D<PixelOut>> {
-        println!("async_func");
         let t = bands_of_tile.first().unwrap();
         let tile = t.as_ref().unwrap().clone();
         let n_rows = tile.grid_array.grid_shape_array()[0];
@@ -270,7 +268,6 @@ where
         query: RasterQueryRectangle,
         ctx: &'a dyn QueryContext,
     ) -> Result<BoxStream<'a, Result<Self::Output>>> {
-        println!("querying");
 
         let mut band_buffer = Vec::new();
 
