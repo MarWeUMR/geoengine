@@ -561,7 +561,9 @@ mod tests {
     use geoengine_datatypes::raster::{GridShape, RasterDataType, TilingSpecification};
     use geoengine_datatypes::spatial_reference::SpatialReference;
     use geoengine_datatypes::util::test::TestDefault;
-    use geoengine_operators::engine::{MultipleRasterSources, PlotOperator, TypedOperator};
+    use geoengine_operators::engine::{
+        MultipleRasterOrSingleVectorSource, PlotOperator, TypedOperator,
+    };
     use geoengine_operators::engine::{RasterOperator, RasterResultDescriptor, VectorOperator};
     use geoengine_operators::mock::{
         MockFeatureCollectionSource, MockPointSource, MockPointSourceParams, MockRasterSource,
@@ -569,6 +571,7 @@ mod tests {
     };
     use geoengine_operators::plot::{Statistics, StatisticsParams};
     use geoengine_operators::source::{GdalSource, GdalSourceParameters};
+    use geoengine_operators::util::input::MultiRasterOrVectorOperator::Raster;
     use geoengine_operators::util::raster_stream_to_geotiff::raster_stream_to_geotiff_bytes;
     use serde_json::json;
     use std::io::Read;
@@ -847,6 +850,7 @@ mod tests {
                         }),
                         time: None,
                         bbox: None,
+                        resolution: None,
                     },
                 },
             }
@@ -881,7 +885,8 @@ mod tests {
                     "unit": null
                 },
                 "time": null,
-                "bbox": null
+                "bbox": null,
+                "resolution": null
             })
         );
     }
@@ -940,8 +945,12 @@ mod tests {
 
         let workflow = Workflow {
             operator: Statistics {
-                params: StatisticsParams {},
-                sources: MultipleRasterSources { rasters: vec![] },
+                params: StatisticsParams {
+                    column_names: vec![],
+                },
+                sources: MultipleRasterOrSingleVectorSource {
+                    source: Raster(vec![]),
+                },
             }
             .boxed()
             .into(),
@@ -1285,6 +1294,10 @@ mod tests {
                         "x": 180.0,
                         "y": -90.0
                     }
+                },
+                "resolution": {
+                    "x": 0.1,
+                    "y": 0.1
                 }
             })
         );

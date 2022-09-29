@@ -163,7 +163,7 @@ impl SentinelS2L2aCogsDataProvider {
                             layer_id: layer_id.clone(),
                         },
                         name: format!("Sentinel S2 L2A COGS {}:{}", zone.name, band.name),
-                        description: "".to_owned(),
+                        description: String::new(),
                         workflow: Workflow {
                             operator: source_operator_from_dataset(
                                 GdalSource::TYPE_NAME,
@@ -587,6 +587,7 @@ impl MetaData<GdalLoadingInfo, RasterResultDescriptor, RasterQueryRectangle>
             measurement: Measurement::Unitless,
             time: None,
             bbox: None,
+            resolution: None, // TODO: determine from STAC or data or hardcode it
         })
     }
 

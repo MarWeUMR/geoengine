@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::handlers;
 use crate::util::config;
 use crate::util::config::get_config_element;
+use crate::util::server::serve_openapi_json;
 use crate::util::server::{
     calculate_max_blocking_threads_per_worker, configure_extractors, render_404, render_405,
     CustomRootSpanBuilder,
@@ -27,12 +28,17 @@ use utoipa_swagger_ui::SwaggerUi;
 pub async fn start_server(static_files_dir: Option<PathBuf>) -> Result<()> {
     let web_config: config::Web = get_config_element()?;
 
+    let external_address = web_config.external_address()?;
+
     info!(
         "Starting server… local address: {}, external address: {}",
         Url::parse(&format!("http://{}/", web_config.bind_address))?,
-        web_config
-            .external_address
-            .unwrap_or(Url::parse(&format!("http://{}/", web_config.bind_address))?)
+        external_address
+    );
+
+    info!(
+        "API documentation is available at {}",
+        external_address.join("swagger-ui/")?
     );
 
     let session_config: crate::util::config::Session = get_config_element()?;
@@ -111,20 +117,40 @@ where
             .configure(handlers::wcs::init_wcs_routes::<C>)
             .configure(handlers::wfs::init_wfs_routes::<C>)
             .configure(handlers::wms::init_wms_routes::<C>)
-            .configure(handlers::workflows::init_workflow_routes::<C>)
-            .service(
-                SwaggerUi::new("/swagger-ui/{_:.*}").url("/api-docs/openapi.json", openapi.clone()),
-            );
+            .configure(handlers::workflows::init_workflow_routes::<C>);
+
+        let mut api_urls = vec![];
+
+        app = serve_openapi_json(
+            app,
+            &mut api_urls,
+            "Geo Engine",
+            "../api-docs/openapi.json",
+            "/api-docs/openapi.json",
+            openapi.clone(),
+        );
 
         #[cfg(feature = "ebv")]
         {
             app = app.service(web::scope("/ebv").configure(handlers::ebv::init_ebv_routes::<C>()));
+
+            app = serve_openapi_json(
+                app,
+                &mut api_urls,
+                "EBV",
+                "../api-docs/ebv/openapi.json",
+                "/api-docs/ebv/openapi.json",
+                crate::handlers::ebv::ApiDoc::openapi(),
+            );
         }
 
         #[cfg(feature = "nfdi")]
         {
             app = app.configure(handlers::gfbio::init_gfbio_routes::<C>);
         }
+
+        app = app.service(SwaggerUi::new("/swagger-ui/{_:.*}").urls(api_urls));
+
         if version_api {
             app = app.route(
                 "/version",
