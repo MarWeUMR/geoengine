@@ -136,13 +136,17 @@ where
 
 
 
-        let tile = bands_of_tile.first().unwrap().unwrap().clone();
-        // let tile = reference_tile.unwrap().clone();
-        let n_rows = tile.grid_array.grid_shape_array()[0];
-        let n_cols = tile.grid_array.grid_shape_array()[1];
-        let n_bands = bands_of_tile.len() as i32;
+        // gather information
+        let reference_tile = bands_of_tile.first().unwrap();
+        let tile = reference_tile.as_ref().unwrap().clone();
+        let n_rows = tile.grid_shape_array()[0];
+        let n_cols = tile.grid_shape_array()[1];
         let grid_shape = tile.grid_shape();
         let props = tile.properties;
+        let n_bands = bands_of_tile.len() as i32;
+        let time = tile.time;
+        let tile_position = tile.tile_position;
+        let global_geo_transform = tile.global_geo_transform;
 
         // extract the actual data from the tiles
         let rasters: Vec<Vec<f32>> = bands_of_tile
@@ -183,7 +187,7 @@ where
                 &pixels,
                 &pool,
                 model.as_bytes(),
-                grid_shape,
+                grid_shape.clone().to_owned(),
                 n_bands as usize,
             )
         })
@@ -192,9 +196,9 @@ where
 
         let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
             RasterTile2D::new_with_properties(
-                tile.time,
-                tile.tile_position,
-                tile.global_geo_transform,
+                time,
+                tile_position,
+                global_geo_transform,
                 predicted_grid.into(),
                 props.clone(),
             );
@@ -291,7 +295,6 @@ mod tests {
         FileNotFoundHandling, GdalDatasetGeoTransform, GdalDatasetParameters, GdalMetaDataRegular,
         GdalSource, GdalSourceParameters, GdalSourceTimePlaceholder, TimeReference,
     };
-    use csv::Writer;
     use futures::StreamExt;
     use geoengine_datatypes::dataset::{DataId, DatasetId};
     use geoengine_datatypes::primitives::{
