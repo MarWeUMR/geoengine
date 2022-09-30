@@ -103,14 +103,14 @@ impl DMatrix {
     /// # Panics
     ///
     /// Will panic, if the matrix creation fails with an error that doesn't come from `XGBoost`.
-    pub fn from_col_major_f64(
-        data: &[f64],
+    pub fn from_col_major_f32(
+        data: &[f32],
         byte_size_ax_0: usize,
         byte_size_ax_1: usize,
         n_rows: usize,
         n_cols: usize,
         n_thread: i32,
-        nan: f64
+        nan: f32
     ) -> XGBResult<Self> {
         let mut handle = ptr::null_mut();
 
@@ -124,8 +124,8 @@ impl DMatrix {
             "{{
             \"data\": [{data_ptr_address}, false], 
             \"strides\": [{byte_size_ax_0}, {byte_size_ax_1}], 
-            \"descr\": [[\"\", \"<f8\"]], 
-            \"typestr\": \"<f8\", 
+            \"descr\": [[\"\", \"<f4\"]], 
+            \"typestr\": \"<f4\", 
             \"shape\": [{n_rows}, {n_cols}], 
             \"version\": 3
         }}"

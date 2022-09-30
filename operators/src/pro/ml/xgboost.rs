@@ -52,26 +52,26 @@ impl RasterOperator for XgboostOperator {
         self: Box<Self>,
         context: &dyn ExecutionContext,
     ) -> Result<Box<dyn InitializedRasterOperator>> {
-        let self_source = self.sources.clone();
-        let rasters = self_source.rasters;
-
         let init_rasters = future::try_join_all(
-            rasters
+            self.sources
+                .rasters
                 .iter()
                 .map(|raster| raster.clone().initialize(context)),
         )
-        .await
-        .unwrap();
+        .await?;
 
         let input = init_rasters.get(0).unwrap();
         let in_desc = input.result_descriptor();
 
         let out_desc = RasterResultDescriptor {
             data_type: RasterOut,
-            time: None,
-            bbox: None,
-            resolution: None,
+            time: in_desc.time,
+            bbox: in_desc.bbox,
+            resolution: in_desc.resolution,
             spatial_reference: in_desc.spatial_reference,
+
+            // where do we get this information from?
+            // test_data/dataset_defs? If so, how to load it?
             measurement: Measurement::Classification(ClassificationMeasurement {
                 measurement: "raw".into(),
                 classes: hashmap!(0 => "Water Bodies".to_string()),
@@ -93,28 +93,18 @@ impl InitializedRasterOperator for InitializedXgboostOperator {
     }
 
     fn query_processor(&self) -> Result<TypedRasterQueryProcessor> {
-
-        let vec_of_rqps = self
+        // given a set of raster bands, if they have different types,
+        // where should they be converted?
+        let vec_of_rqps: Vec<Box<dyn RasterQueryProcessor<RasterType = f64>>> = self
             .sources
             .iter()
-            .map(|init_raster| {
-                let typed_raster_processor = init_raster.query_processor().unwrap();
-                let boxed_raster_data = typed_raster_processor.get_i16().unwrap();
-                boxed_raster_data
-            })
+            .map(|init_raster| init_raster.query_processor().unwrap().into_f64())
             .collect();
 
-        let typed_rqp = match self.sources.first().unwrap().query_processor().unwrap() {
-            QueryProcessorOut(_p) => QueryProcessorOut(Box::new(XgboostProcessor::new(
-                vec_of_rqps,
-                self.model_file_path.clone(),
-            ))),
-            TypedRasterQueryProcessor::I16(_) => QueryProcessorOut(Box::new(
-                XgboostProcessor::new(vec_of_rqps, self.model_file_path.clone()),
-            )),
-            _ => todo!(),
-        };
-        Ok(typed_rqp)
+        Ok(QueryProcessorOut(Box::new(XgboostProcessor::new(
+            vec_of_rqps,
+            self.model_file_path.clone(),
+        ))))
     }
 }
 
@@ -143,8 +133,11 @@ where
         bands_of_tile: Vec<Result<Tile<P>, crate::error::Error>>,
         pool: Arc<ThreadPool>,
     ) -> Result<RasterTile2D<PixelOut>> {
-        let t = bands_of_tile.first().unwrap();
-        let tile = t.as_ref().unwrap().clone();
+
+
+
+        let tile = bands_of_tile.first().unwrap().unwrap().clone();
+        // let tile = reference_tile.unwrap().clone();
         let n_rows = tile.grid_array.grid_shape_array()[0];
         let n_cols = tile.grid_array.grid_shape_array()[1];
         let n_bands = bands_of_tile.len() as i32;
@@ -152,7 +145,7 @@ where
         let props = tile.properties;
 
         // extract the actual data from the tiles
-        let rasters: Vec<Vec<f64>> = bands_of_tile
+        let rasters: Vec<Vec<f32>> = bands_of_tile
             .into_iter()
             .map(|band| {
                 let band_ok = band.unwrap();
@@ -164,14 +157,14 @@ where
                     .data
                     .into_iter()
                     .map(num_traits::AsPrimitive::as_)
-                    .collect::<Vec<f64>>()
+                    .collect::<Vec<f32>>()
             })
             .collect();
 
-        let mut pixels: Vec<f64> = Vec::new();
+        let mut pixels: Vec<f32> = Vec::new();
 
         for row in 0..(n_rows * n_cols) {
-            let mut row_data: Vec<f64> = Vec::new();
+            let mut row_data: Vec<f32> = Vec::new();
             for col in 0..n_bands {
                 let pxl = rasters
                     .get(col as usize)
@@ -185,7 +178,7 @@ where
         }
 
         let model = self.model_file.clone();
-        let predicted_grid = crate::util::spawn_blocking(move || {
+        let predicted_grid: geoengine_datatypes::raster::Grid<GridShape<[usize; 2]>, f32> = crate::util::spawn_blocking(move || {
             process_tile(
                 &pixels,
                 &pool,
@@ -211,7 +204,7 @@ where
 }
 
 fn process_tile(
-    bands_of_tile: &Vec<f64>,
+    bands_of_tile: &Vec<f32>,
     pool: &ThreadPool,
     model_file: &[u8],
     grid_shape: GridShape<[usize; 2]>,
@@ -226,10 +219,10 @@ fn process_tile(
             .par_chunks(chunk_size)
             .map(|elem| {
                 // get xgboost style matrices
-                let xg_matrix = DMatrix::from_col_major_f64(
+                let xg_matrix = DMatrix::from_col_major_f32(
                     elem,
-                    mem::size_of::<f64>() * n_bands,
-                    mem::size_of::<f64>(),
+                    mem::size_of::<f32>() * n_bands,
+                    mem::size_of::<f32>(),
                     n_parallel_pixels,
                     n_bands,
                     -1,
@@ -268,7 +261,6 @@ where
         query: RasterQueryRectangle,
         ctx: &'a dyn QueryContext,
     ) -> Result<BoxStream<'a, Result<Self::Output>>> {
-
         let mut band_buffer = Vec::new();
 
         for band in &self.sources {
@@ -397,7 +389,6 @@ mod tests {
         let op = Box::new(GdalSource {
             params: GdalSourceParameters { data: id.clone() },
         });
-
 
         mc.add_meta_data(id, Box::new(gcm.clone()));
 
@@ -560,14 +551,5 @@ mod tests {
                 all_pixels.push(*pixel);
             }
         }
-
-        // this is only used to verify the result in python plots
-        let mut wtr = Writer::from_path("predictions.csv").unwrap();
-
-        for elem in all_pixels {
-            let num = format!("{elem}");
-            wtr.write_record(&[&num]).unwrap();
-        }
-        wtr.flush().unwrap();
     }
 }

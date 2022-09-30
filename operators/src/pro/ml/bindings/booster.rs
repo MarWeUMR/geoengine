@@ -177,8 +177,8 @@ impl Booster {
         }
 
         let path = Path::new(model_name);
-        let bytes = std::fs::read(&path).expect("read saved booster file");
-        let mut bst = Booster::load_buffer(&bytes[..]).expect("load booster from buffer");
+        let bytes = std::fs::read(path).expect("can't read saved booster file");
+        let mut bst = Booster::load_buffer(&bytes[..]).expect("can't load booster from buffer");
 
         // load distributed code checkpoint from rabit
         let version = bst.load_rabit_checkpoint()?;
@@ -1053,10 +1053,10 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("create temp dir");
         let path = dir.path().join("test-xgboost-model");
-        booster.save(&path).expect("saving booster");
+        booster.save(&path).expect("saving booster failed");
         drop(booster);
-        let bytes = std::fs::read(&path).expect("read saved booster file");
-        let booster = Booster::load_buffer(&bytes[..]).expect("load booster from buffer");
+        let bytes = std::fs::read(&path).expect("reading saved booster file failed");
+        let booster = Booster::load_buffer(&bytes[..]).expect("loading booster from buffer failed");
         let attr = booster
             .get_attribute("foo")
             .expect("Getting attribute failed");
@@ -2339,18 +2339,18 @@ mod tests {
         // define information needed for xgboost
         let strides_ax_0 = data_arr_2d.strides()[0] as usize;
         let strides_ax_1 = data_arr_2d.strides()[1] as usize;
-        let byte_size_ax_0 = std::mem::size_of::<f64>() * strides_ax_0;
-        let byte_size_ax_1 = std::mem::size_of::<f64>() * strides_ax_1;
+        let byte_size_ax_0 = std::mem::size_of::<f32>() * strides_ax_0;
+        let byte_size_ax_1 = std::mem::size_of::<f32>() * strides_ax_1;
 
         // get xgboost style matrices
-        let mut xg_matrix = DMatrix::from_col_major_f64(
+        let mut xg_matrix = DMatrix::from_col_major_f32(
             data_arr_2d.as_slice_memory_order().unwrap(),
             byte_size_ax_0,
             byte_size_ax_1,
             100,
             9,
             -1,
-            f64::NAN,
+            f32::NAN,
         )
         .unwrap();
 
@@ -2605,18 +2605,18 @@ mod tests {
 
         let strides_ax_0 = test_data_arr_2d.strides()[0] as usize;
         let strides_ax_1 = test_data_arr_2d.strides()[1] as usize;
-        let byte_size_ax_0 = std::mem::size_of::<f64>() * strides_ax_0;
-        let byte_size_ax_1 = std::mem::size_of::<f64>() * strides_ax_1;
+        let byte_size_ax_0 = std::mem::size_of::<f32>() * strides_ax_0;
+        let byte_size_ax_1 = std::mem::size_of::<f32>() * strides_ax_1;
 
         // get xgboost style matrices
-        let test_data = DMatrix::from_col_major_f64(
+        let test_data = DMatrix::from_col_major_f32(
             test_data_arr_2d.as_slice_memory_order().unwrap(),
             byte_size_ax_0,
             byte_size_ax_1,
             20,
             9,
             -1,
-            f64::NAN,
+            f32::NAN,
         )
         .unwrap();
 
