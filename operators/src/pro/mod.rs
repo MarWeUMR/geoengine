@@ -2,4 +2,12 @@
 
 pub mod adapters;
 pub mod meta;
+
+#[cfg(feature = "xgboost")]
 pub mod ml;
+
+#[cfg(feature = "xgboost")]
+pub use ml::{
+    xg_error,
+    xgboost_training::{XgboostTrainingOperator, XgboostTrainingParams},
+};

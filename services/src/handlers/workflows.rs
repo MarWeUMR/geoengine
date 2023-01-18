@@ -26,6 +26,8 @@ use geoengine_operators::engine::{OperatorData, TypedOperator, TypedResultDescri
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+#[cfg(feature = "xgboost")]
+use crate::datasets::{schedule_ml_model_from_workflow_task, MachineLearningModelFromWorkflow};
 use crate::datasets::{schedule_raster_dataset_from_workflow_task, RasterDatasetFromWorkflow};
 use crate::handlers::tasks::TaskResponse;
 use crate::util::config::get_config_element;
@@ -69,6 +71,12 @@ where
     .service(
         web::resource("datasetFromWorkflow/{id}")
             .route(web::post().to(dataset_from_workflow_handler::<C>)),
+    );
+
+    #[cfg(feature = "xgboost")]
+    cfg.service(
+        web::resource("mlModelFromWorkflow/{id}")
+            .route(web::post().to(ml_model_from_workflow_handler::<C>)),
     );
 }
 
@@ -143,6 +151,11 @@ async fn register_workflow_handler<C: ApplicationContext>(
                 .context(crate::error::Operator)?;
         }
         TypedOperator::Plot(o) => {
+            o.initialize(&execution_context)
+                .await
+                .context(crate::error::Operator)?;
+        }
+        TypedOperator::MachineLearning(o) => {
             o.initialize(&execution_context)
                 .await
                 .context(crate::error::Operator)?;
@@ -700,6 +713,18 @@ mod tests {
     use std::sync::Arc;
     use zip::read::ZipFile;
     use zip::ZipArchive;
+    #[cfg(feature = "xgboost")]
+    use {
+        crate::contexts::SimpleSession,
+        crate::datasets::MachineLearningModelFromWorkflowResult,
+        crate::util::config::set_config,
+        geoengine_operators::engine::MachineLearningOperator,
+        geoengine_operators::pro::{XgboostTrainingOperator, XgboostTrainingParams},
+        geoengine_operators::util::helper::generate_raster_test_data_band_helper,
+        serial_test::serial,
+        std::collections::HashMap,
+        std::path::PathBuf,
+    };
 
     async fn register_test_helper(method: Method) -> ServiceResponse {
         let app_ctx = InMemoryContext::test_default();
@@ -1472,5 +1497,149 @@ mod tests {
                 as &[u8],
             result.as_slice()
         );
+    }
+
+    #[cfg(feature = "xgboost")]
+    #[tokio::test]
+    #[serial]
+    async fn ml_model_from_workflow_task_success() {
+        let cfg = get_config_element::<crate::util::config::MachineLearning>().unwrap();
+        let cfg_backup = cfg.model_defs_path;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let tmp_path = tmp_dir.path();
+        std::fs::create_dir_all(tmp_path.join("pro/ml/xgboost")).unwrap();
+
+        let temp_ml_path = tmp_path.join("pro/ml").to_str().unwrap().to_string();
+
+        set_config("machinelearning.model_defs_path", temp_ml_path).unwrap();
+
+        let exe_ctx_tiling_spec = TilingSpecification {
+            origin_coordinate: (0., 0.).into(),
+            tile_size_in_pixels: GridShape::new([4, 2]),
+        };
+
+        let ctx = InMemoryContext::new_with_context_spec(
+            exe_ctx_tiling_spec,
+            TestDefault::test_default(),
+        );
+
+        let session_id = ctx.default_session_ref().await.id();
+
+        let src_a = generate_raster_test_data_band_helper(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let src_b = generate_raster_test_data_band_helper(vec![9, 10, 11, 12, 13, 14, 15, 16]);
+        let src_target = generate_raster_test_data_band_helper(vec![0, 1, 2, 2, 2, 1, 0, 0]);
+
+        let mut training_config: HashMap<String, String> = HashMap::new();
+        training_config.insert("validate_parameters".into(), "1".into());
+        training_config.insert("process_type".into(), "default".into());
+        training_config.insert("tree_method".into(), "hist".into());
+        training_config.insert("max_depth".into(), "10".into());
+        training_config.insert("objective".into(), "multi:softmax".into());
+        training_config.insert("num_class".into(), "4".into());
+        training_config.insert("eta".into(), "0.75".into());
+
+        let xg_train = XgboostTrainingOperator {
+            params: XgboostTrainingParams {
+                model_store_path: Some(PathBuf::from("some_model.json")),
+                no_data_value: -1_000.,
+                training_config,
+                feature_names: vec![Some("a".into()), Some("b".into()), Some("target".into())],
+            },
+            sources: vec![
+                src_a.expect("Source (a) should be initialized.").boxed(),
+                src_b.expect("Source (b) should be initialized.").boxed(),
+                src_target
+                    .expect("Source (target) should be initialized.")
+                    .boxed(),
+            ]
+            .into(),
+        };
+
+        let workflow = Workflow {
+            operator: xg_train.boxed().into(),
+        };
+
+        let workflow_id = ctx
+            .workflow_registry_ref()
+            .register(workflow)
+            .await
+            .unwrap();
+
+        // create dataset from workflow
+        let req = test::TestRequest::post()
+            .uri(&format!("/mlModelFromWorkflow/{workflow_id}"))
+            .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())))
+            .append_header((header::CONTENT_TYPE, mime::APPLICATION_JSON))
+            .set_payload(
+                r#"{
+                "name": "foo",
+                "description": null,
+                "query": {
+                    "spatialBounds": {
+                        "lowerLeftCoordinate": {
+                            "x": -180.0,
+                            "y": -90.0
+                        },
+                        "upperRightCoordinate": {
+                            "x": 180.0,
+                            "y": 90.0
+                        }
+                    },
+                    "timeInterval": {
+                        "start": 1385899200000,
+                        "end": 1385899200000
+                    },
+                    "spatialResolution": {
+                        "x": 1.0,
+                        "y": 1.0
+                    }
+                }
+            }"#,
+            );
+        let res = send_test_request(req, ctx.clone()).await;
+
+        assert_eq!(res.status(), 200, "{:?}", res.response());
+
+        let task_response =
+            serde_json::from_str::<TaskResponse>(&read_body_string(res).await).unwrap();
+
+        wait_for_task_to_finish(ctx.tasks(), task_response.task_id).await;
+
+        let status = ctx.tasks().status(task_response.task_id).await.unwrap();
+
+        let response = if let TaskStatus::Completed { info, .. } = status {
+            info.as_any_arc()
+                .downcast::<MachineLearningModelFromWorkflowResult>()
+                .unwrap()
+                .as_ref()
+                .clone()
+        } else {
+            panic!("Task must be completed");
+        };
+
+        let model = response.model;
+
+        // check that the returned model is as expected
+        assert_eq!(
+            include_bytes!("../../../test_data/pro/ml/xgboost/test_model.json") as &[u8],
+            model.to_string().as_bytes()
+        );
+
+        // also check, that the model on disk is as expected
+        let model_path = tmp_path.join("pro/ml").join("some_model.json");
+        let exe_ctx = ctx.execution_context(SimpleSession::default()).unwrap();
+        let model_from_disk = exe_ctx.read_ml_model(model_path).await.unwrap();
+
+        assert_eq!(
+            include_bytes!("../../../test_data/pro/ml/xgboost/test_model.json") as &[u8],
+            model_from_disk.as_bytes()
+        );
+
+        set_config(
+            "machinelearning.model_defs_path",
+            cfg_backup.to_str().unwrap(),
+        )
+        .unwrap();
     }
 }

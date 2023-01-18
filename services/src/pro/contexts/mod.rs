@@ -10,8 +10,9 @@ use geoengine_datatypes::primitives::{RasterQueryRectangle, VectorQueryRectangle
 use geoengine_datatypes::raster::TilingSpecification;
 use geoengine_datatypes::util::canonicalize_subpath;
 use geoengine_operators::engine::{
-    CreateSpan, ExecutionContext, InitializedPlotOperator, InitializedVectorOperator, MetaData,
-    MetaDataProvider, RasterResultDescriptor, VectorResultDescriptor,
+    CreateSpan, ExecutionContext, InitializedMachineLearningOperator, InitializedPlotOperator,
+    InitializedVectorOperator, MetaData, MetaDataProvider, RasterResultDescriptor,
+    VectorResultDescriptor,
 };
 use geoengine_operators::mock::MockDatasetDataSourceLoadingInfo;
 use geoengine_operators::pro::meta::quota::QuotaCheck;
@@ -119,6 +120,15 @@ where
         op
     }
 
+    fn wrap_initialized_machine_learning_operator(
+        &self,
+        op: Box<dyn InitializedMachineLearningOperator>,
+        _span: CreateSpan,
+    ) -> Box<dyn InitializedMachineLearningOperator> {
+        // as plots do not produce a stream of results, we have nothing to count for now
+        op
+    }
+
     /// This method is meant to read a ml model from disk, specified by the config key `machinelearning.model_defs_path`.
     async fn read_ml_model(
         &self,
@@ -127,7 +137,7 @@ where
         let cfg = get_config_element::<crate::util::config::MachineLearning>()
             .map_err(|_| geoengine_operators::error::Error::InvalidMachineLearningConfig)?;
 
-        let model_base_path = cfg.model_defs_path;
+        let model_base_path = cfg.model_defs_path.canonicalize()?;
 
         let model_path = canonicalize_subpath(&model_base_path, &model_sub_path)?;
         let model = tokio::fs::read_to_string(model_path).await?;
@@ -145,7 +155,11 @@ where
         let cfg = get_config_element::<crate::util::config::MachineLearning>()
             .map_err(|_| geoengine_operators::error::Error::InvalidMachineLearningConfig)?;
 
-        let model_base_path = cfg.model_defs_path;
+        let model_base_path = cfg.model_defs_path.canonicalize()?;
+
+        let _file_extension = model_sub_path
+            .extension()
+            .ok_or(geoengine_operators::error::Error::NoValidMlModelFileType)?;
 
         // make sure, that the model sub path is not escaping the config path
         let model_path = path_with_base_path(&model_base_path, &model_sub_path)

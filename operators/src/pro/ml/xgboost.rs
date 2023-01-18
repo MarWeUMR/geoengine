@@ -24,6 +24,7 @@ use crate::engine::{
     QueryContext, QueryProcessor, RasterOperator, RasterQueryProcessor, RasterResultDescriptor,
     TypedRasterQueryProcessor,
 };
+use crate::pro::xg_error::error as XgModuleError;
 use crate::util::stream_zip::StreamVectorZip;
 use crate::util::Result;
 use futures::stream::BoxStream;
@@ -32,56 +33,13 @@ use RasterDataType::F32 as RasterOut;
 use snafu::Snafu;
 use TypedRasterQueryProcessor::F32 as QueryProcessorOut;
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)), context(suffix(false)), module(error))]
-pub enum XGBoostModuleError {
-    #[snafu(display("The XGBoost library could not complete the operation successfully.",))]
-    LibraryError { source: XGBError },
-
-    #[snafu(display("Couldn't parse the model file contents.",))]
-    ModelFileParsingError { source: std::io::Error },
-
-    #[snafu(display("Couldn't create a booster instance from the content of the model file.",))]
-    LoadBoosterFromModelError { source: XGBError },
-
-    #[snafu(display("Couldn't generate a xgboost dmatrix from the given data.",))]
-    CreateDMatrixError { source: XGBError },
-
-    #[snafu(display("Couldn't calculate predictions from the given data.",))]
-    PredictionError { source: XGBError },
-
-    #[snafu(display("Couldn't get a base tile.",))]
-    BaseTileError,
-
-    #[snafu(display("No input data error. At least one raster is required.",))]
-    NoInputData,
-
-    #[snafu(display("There was an error with the creation of a new grid.",))]
-    DataTypesError {
-        source: geoengine_datatypes::error::Error,
-    },
-
-    #[snafu(display("There was an error with the joining of tokio tasks.",))]
-    TokioJoinError { source: tokio::task::JoinError },
-}
-
-impl From<std::io::Error> for XGBoostModuleError {
-    fn from(source: std::io::Error) -> Self {
-        Self::ModelFileParsingError { source }
-    }
-}
-
-impl From<XGBError> for XGBoostModuleError {
-    fn from(source: XGBError) -> Self {
-        Self::LibraryError { source }
-    }
-}
+use super::xg_error::XGBoostModuleError;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct XgboostParams {
-    model_sub_path: PathBuf,
-    no_data_value: f32,
+    pub model_sub_path: PathBuf,
+    pub no_data_value: f32,
 }
 
 pub type XgboostOperator = Operator<XgboostParams, MultipleRasterSources>;
@@ -116,7 +74,7 @@ impl RasterOperator for XgboostOperator {
         )
         .await?;
 
-        let input = init_rasters.get(0).context(self::error::NoInputData)?;
+        let input = init_rasters.get(0).context(XgModuleError::NoInputData)?;
 
         let spatial_reference = input.result_descriptor().spatial_reference;
 
@@ -230,7 +188,7 @@ where
         model_content: Arc<String>,
         pool: Arc<ThreadPool>,
     ) -> Result<BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>>, XGBoostModuleError> {
-        let tile = bands_of_tile.get(0).context(self::error::BaseTile)?;
+        let tile = bands_of_tile.get(0).context(XgModuleError::BaseTile)?;
 
         // gather the data
         let grid_shape = tile.grid_shape();
@@ -252,7 +210,7 @@ where
             )
         })
         .await
-        .context(error::TokioJoin)??;
+        .context(XgModuleError::TokioJoin)??;
 
         let rt: BaseTile<GridOrEmpty<GridShape<[usize; 2]>, f32>> =
             RasterTile2D::new_with_properties(
@@ -307,12 +265,12 @@ fn process_tile(
                     -1, // TODO: add this to settings.toml: # of threads for xgboost to use
                     nan_val,
                 )
-                .context(self::error::CreateDMatrix)?;
+                .context(XgModuleError::CreateDMatrix)?;
 
                 let mut out_dim: u64 = 0;
 
                 let bst = Booster::load_buffer(model_file.as_bytes())
-                    .context(self::error::LoadBoosterFromModel)?;
+                    .context(XgModuleError::LoadBoosterFromModel)?;
 
                 // measure time for prediction
                 let predictions: Result<Vec<f32>, XGBError> = bst.predict_from_dmat(
@@ -327,7 +285,7 @@ fn process_tile(
 
         let predictions_flat: Vec<f32> = res.into_iter().flatten().collect();
 
-        Grid2D::new(grid_shape, predictions_flat).context(self::error::DataTypes)
+        Grid2D::new(grid_shape, predictions_flat).context(XgModuleError::DataTypes)
     })
 }
 

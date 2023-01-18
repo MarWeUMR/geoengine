@@ -12,9 +12,12 @@ use geoengine_datatypes::collections::{
 };
 use geoengine_datatypes::plots::{PlotData, PlotOutputFormat};
 use geoengine_datatypes::primitives::{
-    AxisAlignedRectangle, BoundingBox2D, PlotQueryRectangle, QueryRectangle, RasterQueryRectangle,
-    SpatialPartition2D, VectorQueryRectangle,
+    AxisAlignedRectangle, BoundingBox2D, MachineLearningQueryRectangle, PlotQueryRectangle,
+    QueryRectangle, RasterQueryRectangle, SpatialPartition2D, VectorQueryRectangle,
 };
+
+#[cfg(feature = "xgboost")]
+use geoengine_datatypes::pro::MachineLearningModelOutputFormat;
 use geoengine_datatypes::raster::Pixel;
 use geoengine_datatypes::{collections::MultiPointCollection, raster::RasterTile2D};
 use ouroboros::self_referencing;
@@ -155,6 +158,26 @@ pub trait PlotQueryProcessor: Sync + Send {
     ) -> Result<Self::OutputFormat>;
 
     fn boxed(self) -> Box<dyn PlotQueryProcessor<OutputFormat = Self::OutputFormat>>
+    where
+        Self: Sized + 'static,
+    {
+        Box::new(self)
+    }
+}
+
+#[async_trait]
+pub trait MachineLearningModelQueryProcessor: Sync + Send {
+    type OutputFormat;
+
+    fn model_type(&self) -> &'static str;
+
+    async fn model_query<'a>(
+        &'a self,
+        query: MachineLearningQueryRectangle,
+        ctx: &'a dyn QueryContext,
+    ) -> Result<Self::OutputFormat>;
+
+    fn boxed(self) -> Box<dyn MachineLearningModelQueryProcessor<OutputFormat = Self::OutputFormat>>
     where
         Self: Sized + 'static,
     {
@@ -644,6 +667,38 @@ impl TypedPlotQueryProcessor {
             Some(p)
         } else {
             None
+        }
+    }
+}
+
+/// An enum that contains all possible query processor variants
+pub enum TypedMachineLearningModelQueryProcessor {
+    JsonPlain(Box<dyn MachineLearningModelQueryProcessor<OutputFormat = serde_json::Value>>),
+}
+
+#[cfg(feature = "xgboost")]
+impl From<&TypedMachineLearningModelQueryProcessor> for MachineLearningModelOutputFormat {
+    fn from(typed_processor: &TypedMachineLearningModelQueryProcessor) -> Self {
+        match typed_processor {
+            TypedMachineLearningModelQueryProcessor::JsonPlain(_) => {
+                MachineLearningModelOutputFormat::JsonPlain
+            }
+        }
+    }
+}
+
+impl TypedMachineLearningModelQueryProcessor {
+    pub fn model_type(&self) -> &'static str {
+        match self {
+            TypedMachineLearningModelQueryProcessor::JsonPlain(p) => p.model_type(),
+        }
+    }
+
+    pub fn json_plain(
+        self,
+    ) -> Box<dyn MachineLearningModelQueryProcessor<OutputFormat = serde_json::Value>> {
+        match self {
+            TypedMachineLearningModelQueryProcessor::JsonPlain(p) => p,
         }
     }
 }

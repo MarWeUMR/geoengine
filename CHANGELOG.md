@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a new operator `XGBoost Training`. This operator allows to train a model in order to make predictions using the `XGBoost Prediction` operator.
+
 - Added a generic permission API for all resource types and a role management.
 
   - https://github.com/geo-engine/geoengine/pull/756

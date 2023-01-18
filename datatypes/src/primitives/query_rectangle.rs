@@ -16,6 +16,7 @@ pub struct QueryRectangle<SpatialBounds: AxisAlignedRectangle> {
 pub type VectorQueryRectangle = QueryRectangle<BoundingBox2D>;
 pub type RasterQueryRectangle = QueryRectangle<SpatialPartition2D>;
 pub type PlotQueryRectangle = QueryRectangle<BoundingBox2D>;
+pub type MachineLearningQueryRectangle = QueryRectangle<BoundingBox2D>;
 
 impl SpatialPartitioned for QueryRectangle<BoundingBox2D> {
     fn spatial_partition(&self) -> SpatialPartition2D {

@@ -1,13 +1,15 @@
 pub use clonable_operator::{
-    CloneableInitializedRasterOperator, CloneableInitializedVectorOperator, CloneablePlotOperator,
+    CloneableInitializedMachineLearningOperator, CloneableInitializedRasterOperator,
+    CloneableInitializedVectorOperator, CloneableMachineLearningOperator, CloneablePlotOperator,
     CloneableRasterOperator, CloneableVectorOperator,
 };
 pub use execution_context::{
     ExecutionContext, MetaData, MetaDataProvider, MockExecutionContext, StaticMetaData,
 };
 pub use operator::{
-    InitializedPlotOperator, InitializedRasterOperator, InitializedVectorOperator, OperatorData,
-    OperatorName, PlotOperator, RasterOperator, TypedOperator, VectorOperator,
+    InitializedMachineLearningOperator, InitializedPlotOperator, InitializedRasterOperator,
+    InitializedVectorOperator, MachineLearningOperator, OperatorData, OperatorName, PlotOperator,
+    RasterOperator, TypedOperator, VectorOperator,
 };
 pub use operator_impl::{
     MultipleRasterOrSingleVectorSource, MultipleRasterSources, MultipleVectorSources, Operator,
@@ -19,13 +21,14 @@ pub use query::{
     QueryContextExtensions,
 };
 pub use query_processor::{
-    BoxRasterQueryProcessor, PlotQueryProcessor, QueryProcessor, QueryProcessorExt,
-    RasterQueryProcessor, TypedPlotQueryProcessor, TypedRasterQueryProcessor,
+    BoxRasterQueryProcessor, MachineLearningModelQueryProcessor, PlotQueryProcessor,
+    QueryProcessor, QueryProcessorExt, RasterQueryProcessor,
+    TypedMachineLearningModelQueryProcessor, TypedPlotQueryProcessor, TypedRasterQueryProcessor,
     TypedVectorQueryProcessor, VectorQueryProcessor,
 };
 pub use result_descriptor::{
-    PlotResultDescriptor, RasterResultDescriptor, ResultDescriptor, TypedResultDescriptor,
-    VectorColumnInfo, VectorResultDescriptor,
+    MachineLearningResultDescriptor, PlotResultDescriptor, RasterResultDescriptor,
+    ResultDescriptor, TypedResultDescriptor, VectorColumnInfo, VectorResultDescriptor,
 };
 use tracing::Span;
 
