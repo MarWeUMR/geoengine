@@ -6,8 +6,6 @@ pub mod math;
 pub mod number_statistics;
 pub mod raster_stream_to_geotiff;
 
-#[cfg(feature = "xgboost")]
-pub mod raster_stream_to_ml_model;
 pub mod raster_stream_to_png;
 mod rayon;
 pub mod retry;

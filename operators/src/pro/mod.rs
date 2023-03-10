@@ -7,7 +7,4 @@ pub mod meta;
 pub mod ml;
 
 #[cfg(feature = "xgboost")]
-pub use ml::{
-    xg_error,
-    xgboost_training::{XgboostTrainingOperator, XgboostTrainingParams},
-};
+pub use ml::xg_error;

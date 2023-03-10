@@ -13,6 +13,9 @@ pub mod datasets;
 #[cfg(feature = "ebv")]
 pub mod ebv;
 pub mod layers;
+
+#[cfg(feature = "xgboost")]
+pub mod model_training;
 pub mod plots;
 pub mod projects;
 pub mod session;

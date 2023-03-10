@@ -26,10 +26,10 @@ use geoengine_operators::engine::{OperatorData, TypedOperator, TypedResultDescri
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-#[cfg(feature = "xgboost")]
-use crate::datasets::{schedule_ml_model_from_workflow_task, MachineLearningModelFromWorkflow};
 use crate::datasets::{schedule_raster_dataset_from_workflow_task, RasterDatasetFromWorkflow};
 use crate::handlers::tasks::TaskResponse;
+#[cfg(feature = "xgboost")]
+use crate::model_training::{schedule_ml_model_from_workflow_task, MLTrainRequest};
 use crate::util::config::get_config_element;
 use snafu::{ResultExt, Snafu};
 use zip::{write::FileOptions, ZipWriter};
@@ -75,7 +75,7 @@ where
 
     #[cfg(feature = "xgboost")]
     cfg.service(
-        web::resource("mlModelFromWorkflow/{id}")
+        web::resource("mlModelFromWorkflows")
             .route(web::post().to(ml_model_from_workflow_handler::<C>)),
     );
 }
@@ -581,7 +581,6 @@ pub struct VectorStreamWebsocketQuery {
     pub result_type: RasterStreamWebsocketResultType,
 }
 
-/// Query a workflow raster result as a stream of tiles via a websocket connection.
 #[utoipa::path(
     tag = "Workflows",
     get,
@@ -649,6 +648,40 @@ async fn vector_stream_websocket<C: ApplicationContext>(
     }
 }
 
+// FIXME: what should be in here?
+#[cfg(feature = "xgboost")]
+#[utoipa::path(
+    tag = "Workflows",
+    post,
+    path = "/mlModelFromWorkflows",
+    request_body = MlModelFromWorkflows,
+    responses(
+        (
+            status = 200, description = "Model training from workflows", body = TaskResponse,
+            example = json!({"task_id": "7f8a4cfe-76ab-4972-b347-b197e5ef0f3c"})
+        )
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+async fn ml_model_from_workflow_handler<C: Context>(
+    session: C::Session,
+    ctx: web::Data<C>,
+    info: web::Json<MLTrainRequest>,
+) -> Result<impl Responder> {
+    let task_id = schedule_ml_model_from_workflow_task(
+        info.input_workflows.clone(),
+        info.label_workflow.clone(),
+        session,
+        ctx.into_inner(),
+        info.into_inner(),
+    )
+    .await?;
+
+    Ok(web::Json(TaskResponse::new(task_id)))
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 #[snafu(module(error), context(suffix(false)))] // disables default `Snafu` suffix
@@ -687,8 +720,8 @@ mod tests {
     use actix_web_httpauth::headers::authorization::Bearer;
     use geoengine_datatypes::collections::MultiPointCollection;
     use geoengine_datatypes::primitives::{
-        ContinuousMeasurement, FeatureData, Measurement, MultiPoint, RasterQueryRectangle,
-        SpatialPartition2D, SpatialResolution, TimeInterval,
+        ContinuousMeasurement, FeatureData, Measurement, MultiPoint, SpatialPartition2D,
+        SpatialResolution, TimeInterval,
     };
     use geoengine_datatypes::raster::{GridShape, RasterDataType, TilingSpecification};
     use geoengine_datatypes::spatial_reference::SpatialReference;
@@ -716,10 +749,11 @@ mod tests {
     #[cfg(feature = "xgboost")]
     use {
         crate::contexts::SimpleSession,
-        crate::datasets::MachineLearningModelFromWorkflowResult,
+        crate::model_training::MachineLearningModelFromWorkflowResult,
         crate::util::config::set_config,
-        geoengine_operators::engine::MachineLearningOperator,
-        geoengine_operators::pro::{XgboostTrainingOperator, XgboostTrainingParams},
+        geoengine_datatypes::primitives::{
+            BoundingBox2D, MachineLearningQueryRectangle, QueryRectangle,
+        },
         geoengine_operators::util::helper::generate_raster_test_data_band_helper,
         serial_test::serial,
         std::collections::HashMap,
@@ -1539,64 +1573,60 @@ mod tests {
         training_config.insert("num_class".into(), "4".into());
         training_config.insert("eta".into(), "0.75".into());
 
-        let xg_train = XgboostTrainingOperator {
-            params: XgboostTrainingParams {
+        let workflow_a = Workflow {
+            operator: src_a
+                .expect("Source (a) should be initialized.")
+                .boxed()
+                .into(),
+        };
+
+        let workflow_b = Workflow {
+            operator: src_b
+                .expect("Source (a) should be initialized.")
+                .boxed()
+                .into(),
+        };
+
+        let workflow_target = Workflow {
+            operator: src_target
+                .expect("Source (a) should be initialized.")
+                .boxed()
+                .into(),
+        };
+
+        let spatial_bounds: geoengine_datatypes::primitives::BoundingBox2D =
+            BoundingBox2D::new((-180., -90.).into(), (180., 90.).into()).unwrap();
+
+        let time_interval = TimeInterval::new_instant(
+            geoengine_datatypes::primitives::DateTime::new_utc(2013, 12, 1, 12, 0, 0),
+        )
+        .unwrap();
+
+        let spatial_resolution = SpatialResolution::one();
+
+        let qry: QueryRectangle<BoundingBox2D> = MachineLearningQueryRectangle {
+            spatial_bounds,
+            time_interval,
+            spatial_resolution,
+        };
+
+        let xg_train = crate::model_training::MLTrainRequest {
+            query: qry,
+            params: crate::model_training::XgboostTrainingParams {
                 model_store_path: Some(PathBuf::from("some_model.json")),
                 no_data_value: -1_000.,
                 training_config,
                 feature_names: vec![Some("a".into()), Some("b".into()), Some("target".into())],
             },
-            sources: vec![
-                src_a.expect("Source (a) should be initialized.").boxed(),
-                src_b.expect("Source (b) should be initialized.").boxed(),
-                src_target
-                    .expect("Source (target) should be initialized.")
-                    .boxed(),
-            ]
-            .into(),
+            input_workflows: vec![workflow_a, workflow_b],
+            label_workflow: vec![workflow_target],
         };
 
-        let workflow = Workflow {
-            operator: xg_train.boxed().into(),
-        };
-
-        let workflow_id = ctx
-            .workflow_registry_ref()
-            .register(workflow)
-            .await
-            .unwrap();
-
-        // create dataset from workflow
         let req = test::TestRequest::post()
-            .uri(&format!("/mlModelFromWorkflow/{workflow_id}"))
+            .uri("/mlModelFromWorkflows")
             .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())))
-            .append_header((header::CONTENT_TYPE, mime::APPLICATION_JSON))
-            .set_payload(
-                r#"{
-                "name": "foo",
-                "description": null,
-                "query": {
-                    "spatialBounds": {
-                        "lowerLeftCoordinate": {
-                            "x": -180.0,
-                            "y": -90.0
-                        },
-                        "upperRightCoordinate": {
-                            "x": 180.0,
-                            "y": 90.0
-                        }
-                    },
-                    "timeInterval": {
-                        "start": 1385899200000,
-                        "end": 1385899200000
-                    },
-                    "spatialResolution": {
-                        "x": 1.0,
-                        "y": 1.0
-                    }
-                }
-            }"#,
-            );
+            .set_json(xg_train);
+
         let res = send_test_request(req, ctx.clone()).await;
 
         assert_eq!(res.status(), 200, "{:?}", res.response());

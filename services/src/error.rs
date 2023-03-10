@@ -9,6 +9,7 @@ use crate::handlers::ErrorResponse;
 use crate::{layers::listing::LayerCollectionId, workflows::workflow::WorkflowId};
 use actix_web::http::StatusCode;
 use actix_web::HttpResponse;
+use ordered_float::FloatIsNan;
 use snafu::prelude::*;
 use std::path::PathBuf;
 use strum::IntoStaticStr;
@@ -427,6 +428,18 @@ pub enum Error {
     },
 
     ProviderDoesNotSupportBrowsing,
+    CouldNotGetMlModelPath,
+
+    #[cfg(feature = "xgboost")]
+    #[snafu(context(false))]
+    MachineLearningError {
+        source: crate::model_training::xg_error::XGBoostModuleError,
+    },
+
+    #[snafu(display("NotNan error: {}", source))]
+    InvalidNotNanFloatKey {
+        source: ordered_float::FloatIsNan,
+    },
 }
 
 impl actix_web::error::ResponseError for Error {
@@ -541,5 +554,11 @@ impl From<proj::ProjError> for Error {
 impl From<tokio::task::JoinError> for Error {
     fn from(source: tokio::task::JoinError) -> Self {
         Error::TokioJoin { source }
+    }
+}
+
+impl From<ordered_float::FloatIsNan> for Error {
+    fn from(source: FloatIsNan) -> Self {
+        Error::InvalidNotNanFloatKey { source }
     }
 }

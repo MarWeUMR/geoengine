@@ -49,4 +49,7 @@ pub mod workflows;
 #[cfg(feature = "pro")]
 pub mod pro;
 
+#[cfg(feature = "xgboost")]
+pub mod model_training;
+
 pub use geoengine_datatypes::test_data;
