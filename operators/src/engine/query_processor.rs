@@ -12,8 +12,8 @@ use geoengine_datatypes::collections::{
 };
 use geoengine_datatypes::plots::{PlotData, PlotOutputFormat};
 use geoengine_datatypes::primitives::{
-    AxisAlignedRectangle, BoundingBox2D, MachineLearningQueryRectangle, PlotQueryRectangle,
-    QueryRectangle, RasterQueryRectangle, SpatialPartition2D, VectorQueryRectangle,
+    AxisAlignedRectangle, BoundingBox2D, PlotQueryRectangle, QueryRectangle, RasterQueryRectangle,
+    SpatialPartition2D, VectorQueryRectangle,
 };
 
 #[cfg(feature = "xgboost")]
@@ -173,7 +173,7 @@ pub trait MachineLearningModelQueryProcessor: Sync + Send {
 
     async fn model_query<'a>(
         &'a self,
-        query: MachineLearningQueryRectangle,
+        query: VectorQueryRectangle,
         ctx: &'a dyn QueryContext,
     ) -> Result<Self::OutputFormat>;
 

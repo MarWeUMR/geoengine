@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use geoengine_datatypes::primitives::MachineLearningQueryRectangle;
+use geoengine_datatypes::primitives::VectorQueryRectangle;
 
 #[cfg(feature = "xgboost")]
 use geoengine_datatypes::pro::MachineLearningFeature;
@@ -61,7 +61,7 @@ impl MachineLearningAccum {
 pub async fn accumulate_raster_data(
     feature_names: Vec<Option<String>>,
     input: Vec<TypedRasterQueryProcessor>,
-    query: MachineLearningQueryRectangle,
+    query: VectorQueryRectangle,
     qry_ctx: &dyn QueryContext,
 ) -> Result<Vec<Result<MachineLearningFeature>>> {
     let mut feature_counter = -1;
@@ -125,7 +125,7 @@ pub fn get_operators_from_workflows(
 async fn process_raster(
     name: String,
     input_rpq: &TypedRasterQueryProcessor,
-    query: MachineLearningQueryRectangle,
+    query: VectorQueryRectangle,
     ctx: &dyn QueryContext,
 ) -> Result<MachineLearningFeature> {
     call_on_generic_raster_processor!(input_rpq, processor => {

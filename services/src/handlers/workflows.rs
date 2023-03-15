@@ -751,9 +751,7 @@ mod tests {
         crate::contexts::SimpleSession,
         crate::machine_learning::MachineLearningModelFromWorkflowResult,
         crate::util::config::set_config,
-        geoengine_datatypes::primitives::{
-            BoundingBox2D, MachineLearningQueryRectangle, QueryRectangle,
-        },
+        geoengine_datatypes::primitives::{BoundingBox2D, QueryRectangle, VectorQueryRectangle},
         geoengine_operators::util::helper::generate_raster_test_data_band_helper,
         serial_test::serial,
         std::collections::HashMap,
@@ -1604,7 +1602,7 @@ mod tests {
 
         let spatial_resolution = SpatialResolution::one();
 
-        let qry: QueryRectangle<BoundingBox2D> = MachineLearningQueryRectangle {
+        let qry: QueryRectangle<BoundingBox2D> = VectorQueryRectangle {
             spatial_bounds,
             time_interval,
             spatial_resolution,

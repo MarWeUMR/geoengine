@@ -7,7 +7,7 @@ use crate::handlers::model_training::{
 use crate::tasks::{Task, TaskId, TaskManager, TaskStatusInfo};
 use crate::workflows::workflow::Workflow;
 use geoengine_datatypes::error::ErrorSource;
-use geoengine_datatypes::primitives::MachineLearningQueryRectangle;
+use geoengine_datatypes::primitives::VectorQueryRectangle;
 use geoengine_datatypes::util::Identifier;
 use geoengine_operators::engine::ExecutionContext;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub struct MLTrainRequest {
     pub params: XgboostTrainingParams,
     pub input_workflows: Vec<Workflow>,
     pub label_workflow: Vec<Workflow>,
-    pub query: MachineLearningQueryRectangle,
+    pub query: VectorQueryRectangle,
 }
 
 /// parameter for the dataset from workflow handler (body)
@@ -42,7 +42,7 @@ pub struct MLTrainRequest {
 pub struct MachineLearningModelFromWorkflow {
     pub name: String,
     pub description: Option<String>,
-    pub query: MachineLearningQueryRectangle,
+    pub query: VectorQueryRectangle,
 
     // TODO: is that cog stuff relevant in this case?
     #[schema(default = default_as_cog)]
@@ -68,7 +68,7 @@ pub struct MachineLearningModelFromWorkflowTask<C: Context> {
     pub session: C::Session,
     pub ctx: Arc<C>,
     pub info: MLTrainRequest,
-    pub query: MachineLearningQueryRectangle,
+    pub query: VectorQueryRectangle,
     pub upload: UploadId, // TODO: remove?
     pub store_path: PathBuf,
 }
