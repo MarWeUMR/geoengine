@@ -35,6 +35,8 @@ pub mod datasets;
 pub mod error;
 pub mod handlers;
 pub mod layers;
+#[cfg(feature = "xgboost")]
+pub mod machine_learning;
 pub mod ogc;
 pub mod projects;
 #[cfg(not(feature = "pro"))]
@@ -48,8 +50,5 @@ pub mod workflows;
 /// Compiles Geo Engine Pro
 #[cfg(feature = "pro")]
 pub mod pro;
-
-#[cfg(feature = "xgboost")]
-pub mod model_training;
 
 pub use geoengine_datatypes::test_data;

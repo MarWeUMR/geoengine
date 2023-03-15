@@ -433,7 +433,7 @@ pub enum Error {
     #[cfg(feature = "xgboost")]
     #[snafu(context(false))]
     MachineLearningError {
-        source: crate::model_training::xg_error::XGBoostModuleError,
+        source: crate::machine_learning::xg_error::XGBoostModuleError,
     },
 
     #[snafu(display("NotNan error: {}", source))]

@@ -29,7 +29,7 @@ use utoipa::{IntoParams, ToSchema};
 use crate::datasets::{schedule_raster_dataset_from_workflow_task, RasterDatasetFromWorkflow};
 use crate::handlers::tasks::TaskResponse;
 #[cfg(feature = "xgboost")]
-use crate::model_training::{schedule_ml_model_from_workflow_task, MLTrainRequest};
+use crate::machine_learning::{schedule_ml_model_from_workflow_task, MLTrainRequest};
 use crate::util::config::get_config_element;
 use snafu::{ResultExt, Snafu};
 use zip::{write::FileOptions, ZipWriter};
@@ -749,7 +749,7 @@ mod tests {
     #[cfg(feature = "xgboost")]
     use {
         crate::contexts::SimpleSession,
-        crate::model_training::MachineLearningModelFromWorkflowResult,
+        crate::machine_learning::MachineLearningModelFromWorkflowResult,
         crate::util::config::set_config,
         geoengine_datatypes::primitives::{
             BoundingBox2D, MachineLearningQueryRectangle, QueryRectangle,
@@ -1610,9 +1610,9 @@ mod tests {
             spatial_resolution,
         };
 
-        let xg_train = crate::model_training::MLTrainRequest {
+        let xg_train = crate::machine_learning::MLTrainRequest {
             query: qry,
-            params: crate::model_training::XgboostTrainingParams {
+            params: crate::machine_learning::XgboostTrainingParams {
                 model_store_path: Some(PathBuf::from("some_model.json")),
                 no_data_value: -1_000.,
                 training_config,

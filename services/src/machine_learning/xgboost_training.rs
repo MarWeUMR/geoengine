@@ -9,7 +9,7 @@ use snafu::{ensure, ResultExt};
 use xgboost_rs::{Booster, DMatrix};
 
 use crate::error::Result;
-use crate::model_training::xg_error as XgModuleError;
+use crate::machine_learning::xg_error as XgModuleError;
 use geoengine_datatypes::pro::MachineLearningFeature;
 use ordered_float::NotNan;
 
