@@ -10,9 +10,8 @@ use geoengine_datatypes::primitives::{RasterQueryRectangle, VectorQueryRectangle
 use geoengine_datatypes::raster::TilingSpecification;
 use geoengine_datatypes::util::canonicalize_subpath;
 use geoengine_operators::engine::{
-    CreateSpan, ExecutionContext, InitializedMachineLearningOperator, InitializedPlotOperator,
-    InitializedVectorOperator, MetaData, MetaDataProvider, RasterResultDescriptor,
-    VectorResultDescriptor,
+    CreateSpan, ExecutionContext, InitializedPlotOperator, InitializedVectorOperator, MetaData,
+    MetaDataProvider, RasterResultDescriptor, VectorResultDescriptor,
 };
 use geoengine_operators::mock::MockDatasetDataSourceLoadingInfo;
 use geoengine_operators::pro::meta::quota::QuotaCheck;
@@ -116,15 +115,6 @@ where
         op: Box<dyn InitializedPlotOperator>,
         _span: CreateSpan,
     ) -> Box<dyn InitializedPlotOperator> {
-        // as plots do not produce a stream of results, we have nothing to count for now
-        op
-    }
-
-    fn wrap_initialized_machine_learning_operator(
-        &self,
-        op: Box<dyn InitializedMachineLearningOperator>,
-        _span: CreateSpan,
-    ) -> Box<dyn InitializedMachineLearningOperator> {
         // as plots do not produce a stream of results, we have nothing to count for now
         op
     }

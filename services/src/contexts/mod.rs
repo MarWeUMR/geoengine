@@ -25,10 +25,10 @@ use geoengine_datatypes::dataset::DataId;
 
 use geoengine_datatypes::raster::TilingSpecification;
 use geoengine_operators::engine::{
-    ChunkByteSize, CreateSpan, ExecutionContext, InitializedMachineLearningOperator,
-    InitializedPlotOperator, InitializedVectorOperator, MetaData, MetaDataProvider,
-    QueryAbortRegistration, QueryAbortTrigger, QueryContext, QueryContextExtensions,
-    RasterResultDescriptor, VectorResultDescriptor,
+    ChunkByteSize, CreateSpan, ExecutionContext, InitializedPlotOperator,
+    InitializedVectorOperator, MetaData, MetaDataProvider, QueryAbortRegistration,
+    QueryAbortTrigger, QueryContext, QueryContextExtensions, RasterResultDescriptor,
+    VectorResultDescriptor,
 };
 use geoengine_operators::mock::MockDatasetDataSourceLoadingInfo;
 use geoengine_operators::source::{GdalLoadingInfo, OgrSourceDataset};
@@ -221,14 +221,6 @@ where
         op: Box<dyn InitializedPlotOperator>,
         _span: CreateSpan,
     ) -> Box<dyn InitializedPlotOperator> {
-        op
-    }
-
-    fn wrap_initialized_machine_learning_operator(
-        &self,
-        op: Box<dyn InitializedMachineLearningOperator>,
-        _span: CreateSpan,
-    ) -> Box<dyn InitializedMachineLearningOperator> {
         op
     }
 

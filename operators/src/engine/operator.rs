@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 use crate::error;
@@ -8,12 +6,7 @@ use async_trait::async_trait;
 use geoengine_datatypes::dataset::DataId;
 
 use super::{
-    clonable_operator::CloneableMachineLearningOperator,
-    query_processor::{
-        TypedMachineLearningModelQueryProcessor, TypedRasterQueryProcessor,
-        TypedVectorQueryProcessor,
-    },
-    result_descriptor::MachineLearningResultDescriptor,
+    query_processor::{TypedRasterQueryProcessor, TypedVectorQueryProcessor},
     CloneablePlotOperator, CloneableRasterOperator, CloneableVectorOperator, CreateSpan,
     ExecutionContext, PlotResultDescriptor, RasterResultDescriptor, TypedPlotQueryProcessor,
     VectorResultDescriptor,
@@ -128,39 +121,6 @@ pub trait PlotOperator:
     fn span(&self) -> CreateSpan;
 }
 
-/// Common methods for `MachineLearningOperator`s
-#[typetag::serde(tag = "type")]
-#[async_trait]
-pub trait MachineLearningOperator:
-    CloneableMachineLearningOperator + OperatorData + Send + Sync + std::fmt::Debug
-{
-    async fn _initialize(
-        self: Box<Self>,
-        context: &dyn ExecutionContext,
-    ) -> Result<Box<dyn InitializedMachineLearningOperator>>;
-
-    async fn initialize(
-        self: Box<Self>,
-        context: &dyn ExecutionContext,
-    ) -> Result<Box<dyn InitializedMachineLearningOperator>> {
-        let span = self.span();
-        let op = self._initialize(context).await?;
-        Ok(context.wrap_initialized_machine_learning_operator(op, span))
-    }
-
-    /// Wrap a box around a `MachineLearningOperator`
-    fn boxed(self) -> Box<dyn MachineLearningOperator>
-    where
-        Self: Sized + 'static,
-    {
-        Box::new(self)
-    }
-
-    fn span(&self) -> CreateSpan;
-
-    fn get_model_store_path(&self) -> Option<PathBuf>;
-}
-
 pub trait InitializedRasterOperator: Send + Sync {
     /// Get the result descriptor of the `Operator`
     fn result_descriptor(&self) -> &RasterResultDescriptor;
@@ -209,22 +169,6 @@ pub trait InitializedPlotOperator: Send + Sync {
     }
 }
 
-pub trait InitializedMachineLearningOperator: Send + Sync {
-    /// Get the result descriptor of the `Operator`
-    fn result_descriptor(&self) -> &MachineLearningResultDescriptor;
-
-    /// Instantiate a `TypedMachineLearningQueryProcessor` from a `RasterOperator`
-    fn query_processor(&self) -> Result<TypedMachineLearningModelQueryProcessor>;
-
-    /// Wrap a box around a `RasterOperator`
-    fn boxed(self) -> Box<dyn InitializedMachineLearningOperator>
-    where
-        Self: Sized + 'static,
-    {
-        Box::new(self)
-    }
-}
-
 impl InitializedRasterOperator for Box<dyn InitializedRasterOperator> {
     fn result_descriptor(&self) -> &RasterResultDescriptor {
         self.as_ref().result_descriptor()
@@ -262,7 +206,6 @@ pub enum TypedOperator {
     Vector(Box<dyn VectorOperator>),
     Raster(Box<dyn RasterOperator>),
     Plot(Box<dyn PlotOperator>),
-    MachineLearning(Box<dyn MachineLearningOperator>),
 }
 
 impl TypedOperator {
@@ -296,22 +239,11 @@ impl TypedOperator {
         })
     }
 
-    pub fn get_ml_model(self) -> Result<Box<dyn MachineLearningOperator>> {
-        if let TypedOperator::MachineLearning(o) = self {
-            return Ok(o);
-        }
-        Err(error::Error::InvalidOperatorType {
-            expected: "MachineLearning".to_owned(),
-            found: self.type_name().to_owned(),
-        })
-    }
-
     fn type_name(&self) -> &str {
         match self {
             TypedOperator::Vector(_) => "Vector",
             TypedOperator::Raster(_) => "Raster",
             TypedOperator::Plot(_) => "Plot",
-            TypedOperator::MachineLearning(_) => "MachineLearning",
         }
     }
 }
@@ -334,18 +266,11 @@ impl From<Box<dyn PlotOperator>> for TypedOperator {
     }
 }
 
-impl From<Box<dyn MachineLearningOperator>> for TypedOperator {
-    fn from(operator: Box<dyn MachineLearningOperator>) -> Self {
-        Self::MachineLearning(operator)
-    }
-}
-
 /// An enum to differentiate between `InitializedOperator` variants
 pub enum TypedInitializedOperator {
     Vector(Box<dyn InitializedVectorOperator>),
     Raster(Box<dyn InitializedRasterOperator>),
     Plot(Box<dyn InitializedPlotOperator>),
-    MachineLearning(Box<dyn InitializedMachineLearningOperator>),
 }
 
 impl From<Box<dyn InitializedVectorOperator>> for TypedInitializedOperator {
@@ -366,12 +291,6 @@ impl From<Box<dyn InitializedPlotOperator>> for TypedInitializedOperator {
     }
 }
 
-impl From<Box<dyn InitializedMachineLearningOperator>> for TypedInitializedOperator {
-    fn from(operator: Box<dyn InitializedMachineLearningOperator>) -> Self {
-        TypedInitializedOperator::MachineLearning(operator)
-    }
-}
-
 #[macro_export]
 macro_rules! call_on_typed_operator {
     ($typed_operator:expr, $operator_var:ident => $function_call:expr) => {
@@ -379,7 +298,6 @@ macro_rules! call_on_typed_operator {
             $crate::engine::TypedOperator::Vector($operator_var) => $function_call,
             $crate::engine::TypedOperator::Raster($operator_var) => $function_call,
             $crate::engine::TypedOperator::Plot($operator_var) => $function_call,
-            $crate::engine::TypedOperator::MachineLearning($operator_var) => $function_call,
         }
     };
 }
@@ -390,7 +308,6 @@ impl OperatorData for TypedOperator {
             TypedOperator::Vector(v) => v.data_ids_collect(data_ids),
             TypedOperator::Raster(r) => r.data_ids_collect(data_ids),
             TypedOperator::Plot(p) => p.data_ids_collect(data_ids),
-            TypedOperator::MachineLearning(ml) => ml.data_ids_collect(data_ids),
         }
     }
 }

@@ -65,7 +65,6 @@ pub enum TypedOperator {
     Vector(Box<dyn geoengine_operators::engine::VectorOperator>),
     Raster(Box<dyn geoengine_operators::engine::RasterOperator>),
     Plot(Box<dyn geoengine_operators::engine::PlotOperator>),
-    MachineLearning(Box<dyn geoengine_operators::engine::MachineLearningOperator>),
 }
 
 impl<'a> ToSchema<'a> for TypedOperator {
@@ -194,34 +193,12 @@ impl From<geoengine_operators::engine::PlotResultDescriptor> for PlotResultDescr
     }
 }
 
-/// A `ResultDescriptor` for machine learning queries
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineLearningResultDescriptor {
-    pub spatial_reference: SpatialReferenceOption,
-    pub time: Option<TimeInterval>,
-    pub bbox: Option<BoundingBox2D>,
-}
-
-impl From<geoengine_operators::engine::MachineLearningResultDescriptor>
-    for MachineLearningResultDescriptor
-{
-    fn from(value: geoengine_operators::engine::MachineLearningResultDescriptor) -> Self {
-        Self {
-            spatial_reference: value.spatial_reference.into(),
-            time: value.time.map(Into::into),
-            bbox: value.bbox.map(Into::into),
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum TypedResultDescriptor {
     Plot(PlotResultDescriptor),
     Raster(RasterResultDescriptor),
     Vector(VectorResultDescriptor),
-    MachineLearning(MachineLearningResultDescriptor),
 }
 
 impl From<geoengine_operators::engine::TypedResultDescriptor> for TypedResultDescriptor {
@@ -230,9 +207,6 @@ impl From<geoengine_operators::engine::TypedResultDescriptor> for TypedResultDes
             geoengine_operators::engine::TypedResultDescriptor::Plot(p) => Self::Plot(p.into()),
             geoengine_operators::engine::TypedResultDescriptor::Raster(r) => Self::Raster(r.into()),
             geoengine_operators::engine::TypedResultDescriptor::Vector(v) => Self::Vector(v.into()),
-            geoengine_operators::engine::TypedResultDescriptor::MachineLearning(ml) => {
-                Self::MachineLearning(ml.into())
-            }
         }
     }
 }

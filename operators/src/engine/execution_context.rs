@@ -1,4 +1,3 @@
-use super::operator::InitializedMachineLearningOperator;
 use super::query::QueryAbortRegistration;
 use super::{
     CreateSpan, InitializedPlotOperator, InitializedRasterOperator, InitializedVectorOperator,
@@ -53,12 +52,6 @@ pub trait ExecutionContext: Send
         op: Box<dyn InitializedPlotOperator>,
         span: CreateSpan,
     ) -> Box<dyn InitializedPlotOperator>;
-
-    fn wrap_initialized_machine_learning_operator(
-        &self,
-        op: Box<dyn InitializedMachineLearningOperator>,
-        span: CreateSpan,
-    ) -> Box<dyn InitializedMachineLearningOperator>;
 
     async fn read_ml_model(&self, path: PathBuf) -> Result<String>;
 
@@ -194,14 +187,6 @@ impl ExecutionContext for MockExecutionContext {
         op: Box<dyn InitializedPlotOperator>,
         _span: CreateSpan,
     ) -> Box<dyn InitializedPlotOperator> {
-        op
-    }
-
-    fn wrap_initialized_machine_learning_operator(
-        &self,
-        op: Box<dyn InitializedMachineLearningOperator>,
-        _span: CreateSpan,
-    ) -> Box<dyn InitializedMachineLearningOperator> {
         op
     }
 

@@ -155,11 +155,6 @@ async fn register_workflow_handler<C: ApplicationContext>(
                 .await
                 .context(crate::error::Operator)?;
         }
-        TypedOperator::MachineLearning(o) => {
-            o.initialize(&execution_context)
-                .await
-                .context(crate::error::Operator)?;
-        }
     }
 
     let id = ctx.db().register_workflow(workflow).await?;

@@ -265,56 +265,12 @@ impl From<RasterResultDescriptor> for PlotResultDescriptor {
     }
 }
 
-/// A `ResultDescriptor` for machine learning model queries
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineLearningResultDescriptor {
-    pub spatial_reference: SpatialReferenceOption,
-    pub time: Option<TimeInterval>,
-    pub bbox: Option<BoundingBox2D>,
-}
-
-impl ResultDescriptor for MachineLearningResultDescriptor {
-    type DataType = ();
-
-    fn data_type(&self) -> Self::DataType {}
-
-    fn spatial_reference(&self) -> SpatialReferenceOption {
-        self.spatial_reference
-    }
-
-    fn map_data_type<F>(&self, _f: F) -> Self
-    where
-        F: Fn(&Self::DataType) -> Self::DataType,
-    {
-        *self
-    }
-
-    fn map_spatial_reference<F>(&self, _f: F) -> Self
-    where
-        F: Fn(&SpatialReferenceOption) -> SpatialReferenceOption,
-    {
-        *self
-    }
-
-    fn map_time<F>(&self, f: F) -> Self
-    where
-        F: Fn(&Option<TimeInterval>) -> Option<TimeInterval>,
-    {
-        Self {
-            time: f(&self.time),
-            ..*self
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum TypedResultDescriptor {
     Plot(PlotResultDescriptor),
     Raster(RasterResultDescriptor),
     Vector(VectorResultDescriptor),
-    MachineLearning(MachineLearningResultDescriptor),
 }
 
 impl From<PlotResultDescriptor> for TypedResultDescriptor {
@@ -332,12 +288,6 @@ impl From<RasterResultDescriptor> for TypedResultDescriptor {
 impl From<VectorResultDescriptor> for TypedResultDescriptor {
     fn from(value: VectorResultDescriptor) -> Self {
         Self::Vector(value)
-    }
-}
-
-impl From<MachineLearningResultDescriptor> for TypedResultDescriptor {
-    fn from(value: MachineLearningResultDescriptor) -> Self {
-        Self::MachineLearning(value)
     }
 }
 
