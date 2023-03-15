@@ -63,6 +63,7 @@ pub enum XGBoostModuleError {
     MachineLearningMustHaveAtLeastTwoFeatures,
     MachineLearningFeatureDataNotAvailable,
     CouldNotGetMlLabelKeyName,
+    CouldNotGetMlModelPath,
 }
 
 impl From<std::io::Error> for XGBoostModuleError {

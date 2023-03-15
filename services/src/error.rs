@@ -428,7 +428,6 @@ pub enum Error {
     },
 
     ProviderDoesNotSupportBrowsing,
-    CouldNotGetMlModelPath,
 
     #[cfg(feature = "xgboost")]
     #[snafu(context(false))]

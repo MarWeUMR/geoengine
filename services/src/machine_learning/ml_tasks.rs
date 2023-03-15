@@ -156,7 +156,7 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
         .params
         .model_store_path
         .clone()
-        .ok_or_else(|| crate::error::Error::CouldNotGetMlModelPath)?;
+        .ok_or_else(|| super::xg_error::XGBoostModuleError::CouldNotGetMlModelPath)?;
     let upload = UploadId::new();
 
     let task = MachineLearningModelFromWorkflowTask {
