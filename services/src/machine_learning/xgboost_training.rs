@@ -10,7 +10,7 @@ use xgboost_rs::{Booster, DMatrix};
 
 use crate::error::Result;
 use crate::machine_learning::xg_error as XgModuleError;
-use geoengine_datatypes::pro::MachineLearningFeature;
+use crate::machine_learning::MachineLearningFeature;
 use ordered_float::NotNan;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

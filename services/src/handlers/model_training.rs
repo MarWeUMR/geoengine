@@ -2,7 +2,6 @@ use futures::StreamExt;
 use geoengine_datatypes::primitives::VectorQueryRectangle;
 
 #[cfg(feature = "xgboost")]
-use geoengine_datatypes::pro::MachineLearningFeature;
 use geoengine_datatypes::raster::GridOrEmpty;
 use geoengine_operators::call_on_generic_raster_processor;
 use geoengine_operators::engine::{
@@ -13,6 +12,7 @@ use num_traits::AsPrimitive;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::machine_learning::MachineLearningFeature;
 use crate::workflows::workflow::Workflow;
 
 const BATCH_SIZE: usize = 1_000;
