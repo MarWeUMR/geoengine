@@ -1610,6 +1610,7 @@ mod tests {
                 no_data_value: -1_000.,
                 training_config,
                 feature_names: vec![Some("a".into()), Some("b".into()), Some("target".into())],
+                aggregate_variant: crate::machine_learning::MachineLearningAggregator::Simple,
             },
             input_workflows: vec![workflow_a, workflow_b],
             label_workflow: vec![workflow_target],

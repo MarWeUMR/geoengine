@@ -29,3 +29,58 @@ impl MachineLearningFeature {
         }
     }
 }
+
+/// This enum represents the different aggregators that can be used to initialize the
+/// different algorithms for collecting the data used in ml training.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum MachineLearningAggregator {
+    Simple,
+    ReservoirSampling,
+}
+
+/// The purpose of this trait is to facilitate a generic aggregation process of raster data.
+pub trait Aggregatable {
+    type Data;
+
+    /// This method should realize the aggregation algorithm of the implementing struct.
+    fn aggregate(&mut self, incoming_data: Self::Data);
+
+    /// Once the aggregation process is finished, return the data for further usage.
+    fn finish(self) -> Self::Data;
+}
+
+/// A simple aggregator that just collects all incoming data in a vector.
+pub struct SimpleAggregator<T> {
+    pub data: Vec<T>,
+}
+
+impl<T> Aggregatable for SimpleAggregator<T> {
+    type Data = Vec<T>;
+
+    fn aggregate(&mut self, incoming_data: Vec<T>) {
+        self.data.extend(incoming_data);
+    }
+
+    fn finish(self) -> Vec<T> {
+        self.data
+    }
+}
+
+/// A reservoir sampling aggregator that samples a given number of elements from the incoming data.
+/// This aggregator can be used, when the data size exceeds the available memory.
+pub struct ReservoirSamplingAggregator<T> {
+    pub data: Vec<T>,
+}
+
+// TODO: implement reservoir sampling
+impl<T> Aggregatable for ReservoirSamplingAggregator<T> {
+    type Data = Vec<T>;
+
+    fn aggregate(&mut self, incoming_data: Vec<T>) {
+        self.data.extend(incoming_data);
+    }
+
+    fn finish(self) -> Vec<T> {
+        self.data
+    }
+}

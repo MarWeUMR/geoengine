@@ -13,6 +13,8 @@ use crate::machine_learning::xg_error as XgModuleError;
 use crate::machine_learning::MachineLearningFeature;
 use ordered_float::NotNan;
 
+use super::MachineLearningAggregator;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XgboostTrainingParams {
@@ -21,6 +23,7 @@ pub struct XgboostTrainingParams {
     pub no_data_value: f32, // FIXME: remove?
     pub training_config: HashMap<String, String>,
     pub feature_names: Vec<Option<String>>,
+    pub aggregate_variant: MachineLearningAggregator,
 }
 
 pub fn xgb_train_model(

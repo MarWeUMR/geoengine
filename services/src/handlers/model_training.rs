@@ -12,61 +12,22 @@ use num_traits::AsPrimitive;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::machine_learning::MachineLearningFeature;
+use crate::machine_learning::{
+    Aggregatable, MachineLearningAggregator, MachineLearningFeature, SimpleAggregator,
+};
 use crate::workflows::workflow::Workflow;
-
-const BATCH_SIZE: usize = 1_000;
-
-#[derive(Debug)]
-enum MachineLearningAccumKind {
-    XGBoost(Vec<f32>),
-}
-
-#[cfg(feature = "xgboost")]
-#[derive(Debug)]
-/// Used to gather the source data before further processing/shaping for xgboost
-struct MachineLearningAccum {
-    feature_name: String,
-    accum: MachineLearningAccumKind,
-}
-
-impl MachineLearningAccum {
-    fn new(feature_name: String) -> MachineLearningAccum {
-        MachineLearningAccum {
-            feature_name,
-            accum: MachineLearningAccumKind::XGBoost(Vec::new()),
-        }
-    }
-
-    fn update(&mut self, values: impl Iterator<Item = f32>) {
-        match self.accum {
-            MachineLearningAccumKind::XGBoost(ref mut accumulator) => {
-                for chunk in &itertools::Itertools::chunks(values, BATCH_SIZE) {
-                    accumulator.extend(chunk.filter(|x| x.is_finite()));
-                }
-            }
-        }
-    }
-
-    fn finish(&mut self) -> MachineLearningFeature {
-        match &self.accum {
-            MachineLearningAccumKind::XGBoost(data) => {
-                MachineLearningFeature::new(Some(self.feature_name.clone()), data.clone())
-            }
-        }
-    }
-}
 
 /// Build ML Features from the raw data and assign feature names.
 pub async fn accumulate_raster_data(
     feature_names: Vec<Option<String>>,
-    input: Vec<TypedRasterQueryProcessor>,
+    processors: Vec<TypedRasterQueryProcessor>,
     query: VectorQueryRectangle,
     qry_ctx: &dyn QueryContext,
+    accum_variant: MachineLearningAggregator,
 ) -> Result<Vec<Result<MachineLearningFeature>>> {
     let mut feature_counter = -1;
 
-    let data = input
+    let collected_ml_features = processors
         .iter()
         .zip(feature_names.iter())
         .map(|(op, feature_name)| {
@@ -76,11 +37,26 @@ pub async fn accumulate_raster_data(
                 feature_counter += 1;
                 format!("feature_{feature_counter}")
             };
-            process_raster(name, op, query, qry_ctx)
+
+            let ml_feature = match accum_variant {
+                MachineLearningAggregator::Simple => {
+                    let aggregator = SimpleAggregator::<f32> { data: Vec::new() };
+                    let feature = process_raster::<SimpleAggregator<f32>>(
+                        name, op, query, qry_ctx, aggregator,
+                    );
+                    feature
+                }
+                MachineLearningAggregator::ReservoirSampling => {
+                    todo!()
+                }
+            };
+
+            ml_feature
         })
         .collect::<Vec<_>>();
 
-    let results: Vec<Result<MachineLearningFeature>> = futures::future::join_all(data).await;
+    let results: Vec<Result<MachineLearningFeature>> =
+        futures::future::join_all(collected_ml_features).await;
     Ok(results)
 }
 
@@ -121,18 +97,17 @@ pub fn get_operators_from_workflows(
     Ok(initialized_raster_operators)
 }
 
-/// Collect data from a raster source to an ML Accumulator
-async fn process_raster(
+/// Collect data from a raster source into a ML Feature
+async fn process_raster<C: Aggregatable<Data = Vec<f32>>>(
     name: String,
     input_rpq: &TypedRasterQueryProcessor,
     query: VectorQueryRectangle,
     ctx: &dyn QueryContext,
+    mut aggregator_variant: C,
 ) -> Result<MachineLearningFeature> {
     call_on_generic_raster_processor!(input_rpq, processor => {
 
         let mut stream = processor.query(query.into(), ctx).await?;
-        let mut accum = MachineLearningAccum::new(name);
-
 
         while let Some(tile) = stream.next().await {
             let tile = tile?;
@@ -141,14 +116,25 @@ async fn process_raster(
                 // Ignore empty grids if no_data should not be included
                 GridOrEmpty::Empty(_) => {},
                 GridOrEmpty::Grid(grid) => {
-                    accum.update(
-                        grid.masked_element_deref_iterator().filter_map(|pixel_option| {
-                            pixel_option.map(|p| { let v: f32 = p.as_(); v})
-                        }));
+                    // fetch the tile data
+                    let values = grid
+                        .masked_element_deref_iterator()
+                        .filter_map(|pixel_option| {
+                            pixel_option.map(|p| {
+                                let v: f32 = p.as_();
+                                v
+                            })
+                        }).collect(); // TODO: make this work for more types
+
+                    // now let the accumulator collect the data
+                    aggregator_variant.aggregate(values);
                 }
             }
         }
 
-        Ok(accum.finish())
+        let collected_data = aggregator_variant.finish();
+
+        Ok(MachineLearningFeature::new(Some(name), collected_data))
+
     })
 }
