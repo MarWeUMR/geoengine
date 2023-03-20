@@ -389,6 +389,7 @@ impl ConfigElement for Session {
 
 #[derive(Debug, Deserialize)]
 pub struct MachineLearning {
+    #[serde(default)]
     pub model_defs_path: PathBuf,
 }
 

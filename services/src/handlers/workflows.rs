@@ -736,6 +736,10 @@ mod tests {
         single_timestep_raster_stream_to_geotiff_bytes, GdalGeoTiffDatasetMetadata,
         GdalGeoTiffOptions,
     };
+
+    use std::path::PathBuf;
+    use tokio::{fs::File, io::AsyncReadExt};
+
     use serde_json::json;
     use std::io::Read;
     use std::sync::Arc;
@@ -745,7 +749,6 @@ mod tests {
     use {
         crate::contexts::SimpleSession,
         crate::machine_learning::MachineLearningModelFromWorkflowResult,
-        crate::util::config::set_config,
         geoengine_datatypes::primitives::{BoundingBox2D, QueryRectangle, VectorQueryRectangle},
         geoengine_operators::util::helper::generate_raster_test_data_band_helper,
         serial_test::serial,
@@ -1529,20 +1532,9 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn ml_model_from_workflow_task_success() {
-        use std::path::PathBuf;
-
-        use tokio::{fs::File, io::AsyncReadExt};
-
         let cfg = get_config_element::<crate::util::config::MachineLearning>().unwrap();
-        let cfg_backup = cfg.model_defs_path;
 
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let tmp_path = tmp_dir.path();
-        std::fs::create_dir_all(tmp_path.join("pro/ml/xgboost")).unwrap();
-
-        let temp_ml_path = tmp_path.join("pro/ml").to_str().unwrap().to_string();
-
-        set_config("machinelearning.model_defs_path", temp_ml_path).unwrap();
+        std::fs::create_dir_all(&cfg.model_defs_path).unwrap();
 
         let exe_ctx_tiling_spec = TilingSpecification {
             origin_coordinate: (0., 0.).into(),
@@ -1648,31 +1640,36 @@ mod tests {
         let model = response.model;
 
         // get the content of the test model on disk to compare against
-        let test_model_path = PathBuf::from(geoengine_datatypes::test_data!("pro/ml/xgboost/test_model.json"));
+        let test_model_path = PathBuf::from(geoengine_datatypes::test_data!(
+            "pro/ml/xgboost/test_model.json"
+        ));
         let mut test_model_bytes: Vec<u8> = Vec::new();
-        let mut f = File::open(test_model_path).await.expect("Unable to open file of test model");
-        f.read_to_end(&mut test_model_bytes).await.expect("Could not read file of test model");
+        let mut f = File::open(test_model_path)
+            .await
+            .expect("Unable to open file of test model");
+        f.read_to_end(&mut test_model_bytes)
+            .await
+            .expect("Could not read file of test model");
 
         // check that the returned model is as expected
-        assert_eq!(
-            &test_model_bytes as &[u8],
-            model.to_string().as_bytes()
-        );
+        assert_eq!(&test_model_bytes as &[u8], model.to_string().as_bytes());
 
         // also check, that the model (which was written after training) on disk is as expected
-        let model_path = tmp_path.join("pro/ml").join("some_model.json");
+        let model_path = &cfg.model_defs_path.join("some_model.json");
         let exe_ctx = ctx.execution_context(SimpleSession::default()).unwrap();
-        let model_from_disk = exe_ctx.read_ml_model(model_path).await.unwrap();
+        let model_from_disk = exe_ctx
+            .read_ml_model(model_path.to_path_buf())
+            .await
+            .expect("Could not read specified ml model from disk");
 
-        assert_eq!(
-            &test_model_bytes as &[u8],
-            model_from_disk.as_bytes()
-        );
+        assert_eq!(&test_model_bytes as &[u8], model_from_disk.as_bytes());
 
-        set_config(
-            "machinelearning.model_defs_path",
-            cfg_backup.to_str().unwrap(),
+        // clean up after testing
+        std::fs::remove_dir_all(
+            &cfg.model_defs_path
+                .parent()
+                .expect("Could not access parent directory of test model store directory"),
         )
-        .unwrap();
+        .expect("Could not delete test model store directory");
     }
 }
