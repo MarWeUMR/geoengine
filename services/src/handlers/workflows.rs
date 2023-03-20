@@ -750,7 +750,6 @@ mod tests {
         geoengine_operators::util::helper::generate_raster_test_data_band_helper,
         serial_test::serial,
         std::collections::HashMap,
-        std::path::PathBuf,
     };
 
     async fn register_test_helper(method: Method) -> ServiceResponse {
@@ -1606,7 +1605,6 @@ mod tests {
         let xg_train = crate::machine_learning::MLTrainRequest {
             query: qry,
             params: crate::machine_learning::XgboostTrainingParams {
-                model_store_path: Some(PathBuf::from("some_model.json")),
                 no_data_value: -1_000.,
                 training_config,
                 feature_names: vec![Some("a".into()), Some("b".into()), Some("target".into())],

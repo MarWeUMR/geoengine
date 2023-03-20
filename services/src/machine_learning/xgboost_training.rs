@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use typetag::serde;
@@ -18,8 +18,6 @@ use super::MachineLearningAggregator;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XgboostTrainingParams {
-    // where to store the model file
-    pub model_store_path: Option<PathBuf>,
     pub no_data_value: f32, // FIXME: remove?
     pub training_config: HashMap<String, String>,
     pub feature_names: Vec<Option<String>>,

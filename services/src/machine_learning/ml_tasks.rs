@@ -5,6 +5,7 @@ use crate::handlers::model_training::{
     accumulate_raster_data, get_operators_from_workflows, get_query_processors,
 };
 use crate::tasks::{Task, TaskId, TaskManager, TaskStatusInfo};
+use crate::util::config::get_config_element;
 use crate::workflows::workflow::Workflow;
 use geoengine_datatypes::error::ErrorSource;
 use geoengine_datatypes::primitives::VectorQueryRectangle;
@@ -75,7 +76,6 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
     async fn process(&self) -> error::Result<MachineLearningModelFromWorkflowResult> {
         let agg_variant = self.info.params.aggregate_variant.clone();
         let train_cfg = self.info.params.training_config.clone();
-        let store_path = self.store_path.clone();
         let feature_names = self.info.params.feature_names.clone();
 
         // put the labels workflow at the end of the workflow vec
@@ -106,10 +106,10 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
         let model = xgb_train_model(&mut accumulated_data, train_cfg)?;
 
         exe_ctx
-            .write_ml_model(store_path.clone(), model.to_string())
+            .write_ml_model(self.store_path.clone(), model.to_string())
             .await?;
 
-        Ok(MachineLearningModelFromWorkflowResult { store_path, model })
+        Ok(MachineLearningModelFromWorkflowResult { store_path: self.store_path.clone(), model })
     }
 }
 
@@ -153,11 +153,7 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
     ctx: Arc<C>,
     info: MLTrainRequest,
 ) -> error::Result<TaskId> {
-    let store_path = info
-        .params
-        .model_store_path
-        .clone()
-        .ok_or_else(|| super::xg_error::XGBoostModuleError::CouldNotGetMlModelPath)?;
+    let store_path = get_config_element::<crate::util::config::MachineLearning>()?.model_defs_path;
     let upload = UploadId::new();
 
     let task = MachineLearningModelFromWorkflowTask {

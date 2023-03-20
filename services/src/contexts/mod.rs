@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use geoengine_datatypes::primitives::{RasterQueryRectangle, VectorQueryRectangle};
 use geoengine_datatypes::util::canonicalize_subpath;
 use rayon::ThreadPool;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -247,22 +248,10 @@ where
         model_sub_path: std::path::PathBuf,
         ml_model_str: String,
     ) -> geoengine_operators::util::Result<()> {
-        let cfg = get_config_element::<crate::util::config::MachineLearning>()
-            .map_err(|_| geoengine_operators::error::Error::InvalidMachineLearningConfig)?;
-
-        // FIXME: this is so messed up. I don't get how to make this work without some workaround
-        // for different current working directories.
-        let model_base_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(cfg.model_defs_path)
-            .canonicalize()?;
-
-        let _file_extension = model_sub_path
-            .extension()
-            .ok_or(geoengine_operators::error::Error::NoValidMlModelFileType)?;
-
+                
         // make sure, that the model sub path is not escaping the config path
-        let model_path = path_with_base_path(&model_base_path, &model_sub_path)
+        // FIXME: how to generate the model name/id?
+        let model_path = path_with_base_path(&model_sub_path, &PathBuf::from("some_model.json"))
             .map_err(|_| geoengine_operators::error::Error::InvalidMlModelPath)?;
 
         let parent_dir = model_path
