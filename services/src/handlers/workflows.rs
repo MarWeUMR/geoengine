@@ -1607,7 +1607,8 @@ mod tests {
             params: crate::machine_learning::XgboostTrainingParams {
                 no_data_value: -1_000.,
                 training_config,
-                feature_names: vec![Some("a".into()), Some("b".into()), Some("target".into())],
+                feature_names: vec![Some("a".into()), Some("b".into())],
+                label_name: Some("target".into()),
                 aggregate_variant: crate::machine_learning::MachineLearningAggregator::Simple,
             },
             input_workflows: vec![workflow_a, workflow_b],

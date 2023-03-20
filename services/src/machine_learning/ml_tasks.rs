@@ -12,7 +12,7 @@ use geoengine_datatypes::primitives::VectorQueryRectangle;
 use geoengine_datatypes::util::Identifier;
 use geoengine_operators::engine::ExecutionContext;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
@@ -76,12 +76,23 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
     async fn process(&self) -> error::Result<MachineLearningModelFromWorkflowResult> {
         let agg_variant = self.info.params.aggregate_variant.clone();
         let train_cfg = self.info.params.training_config.clone();
-        let feature_names = self.info.params.feature_names.clone();
+        let mut feature_names = self.info.params.feature_names.clone();
 
         // put the labels workflow at the end of the workflow vec
         let mut inputs = self.info.input_workflows.clone();
         let labels = self.info.label_workflow.clone();
         inputs.extend(labels);
+
+        // do the same for the names
+        feature_names.extend(Some(self.info.params.label_name.clone()));
+
+        ensure!(
+            inputs.len() == feature_names.len(),
+            super::xg_error::error::WrongNumberOfFeatureNamesProvided {
+                workflows: inputs.len(),
+                names: feature_names.len()
+            }
+        );
 
         let input_operators = get_operators_from_workflows(inputs)?;
 
@@ -109,7 +120,10 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
             .write_ml_model(self.store_path.clone(), model.to_string())
             .await?;
 
-        Ok(MachineLearningModelFromWorkflowResult { store_path: self.store_path.clone(), model })
+        Ok(MachineLearningModelFromWorkflowResult {
+            store_path: self.store_path.clone(),
+            model,
+        })
     }
 }
 

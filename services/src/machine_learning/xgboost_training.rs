@@ -21,6 +21,7 @@ pub struct XgboostTrainingParams {
     pub no_data_value: f32, // FIXME: remove?
     pub training_config: HashMap<String, String>,
     pub feature_names: Vec<Option<String>>,
+    pub label_name: Option<String>,
     pub aggregate_variant: MachineLearningAggregator,
 }
 

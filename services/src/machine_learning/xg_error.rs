@@ -60,6 +60,12 @@ pub enum XGBoostModuleError {
         source: tokio::task::JoinError,
     },
 
+    #[snafu(display("Inputs and feature + label names must have same length. Got {} inputs and {} names instead.", workflows, names))]
+    WrongNumberOfFeatureNamesProvided {
+        workflows: usize,
+        names: usize,
+    },
+
     MachineLearningMustHaveAtLeastTwoFeatures,
     MachineLearningFeatureDataNotAvailable,
     CouldNotGetMlLabelKeyName,
