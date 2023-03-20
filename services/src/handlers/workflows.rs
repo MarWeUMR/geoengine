@@ -28,11 +28,12 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::datasets::{schedule_raster_dataset_from_workflow_task, RasterDatasetFromWorkflow};
 use crate::handlers::tasks::TaskResponse;
-#[cfg(feature = "xgboost")]
-use crate::machine_learning::{schedule_ml_model_from_workflow_task, MLTrainRequest};
 use crate::util::config::get_config_element;
 use snafu::{ResultExt, Snafu};
 use zip::{write::FileOptions, ZipWriter};
+
+#[cfg(feature = "xgboost")]
+use super::model_training::ml_model_from_workflow_handler;
 
 pub(crate) fn init_workflow_routes<C>(cfg: &mut web::ServiceConfig)
 where
@@ -640,39 +641,6 @@ async fn vector_stream_websocket<C: ApplicationContext>(
         Ok(websocket) => Ok(websocket),
         Err(e) => Ok(e.error_response()),
     }
-}
-
-#[cfg(feature = "xgboost")]
-#[utoipa::path(
-    tag = "Machine Learning",
-    post,
-    path = "/ml/train",
-    request_body = MLTrainRequest,
-    responses(
-        (
-            status = 200, description = "Model training from workflows", body = TaskResponse,
-            example = json!({"taskId": "7f8a4cfe-76ab-4972-b347-b197e5ef0f3c"})
-        )
-    ),
-    security(
-        ("session_token" = [])
-    )
-)]
-async fn ml_model_from_workflow_handler<C: Context>(
-    session: C::Session,
-    ctx: web::Data<C>,
-    info: web::Json<MLTrainRequest>,
-) -> Result<impl Responder> {
-    let task_id = schedule_ml_model_from_workflow_task(
-        info.input_workflows.clone(),
-        info.label_workflow.clone(),
-        session,
-        ctx.into_inner(),
-        info.into_inner(),
-    )
-    .await?;
-
-    Ok(web::Json(TaskResponse::new(task_id)))
 }
 
 #[derive(Debug, Snafu)]

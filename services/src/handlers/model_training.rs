@@ -1,3 +1,4 @@
+use actix_web::{web, Responder};
 use futures::StreamExt;
 use geoengine_datatypes::primitives::VectorQueryRectangle;
 
@@ -9,12 +10,47 @@ use geoengine_operators::engine::{
 };
 use num_traits::AsPrimitive;
 
+use super::tasks::TaskResponse;
+use crate::contexts::Context;
 use crate::error::Error;
 use crate::error::Result;
 use crate::machine_learning::{
-    Aggregatable, MachineLearningAggregator, MachineLearningFeature, SimpleAggregator,
+    schedule_ml_model_from_workflow_task, Aggregatable, MLTrainRequest, MachineLearningAggregator,
+    MachineLearningFeature, SimpleAggregator,
 };
 use crate::workflows::workflow::Workflow;
+
+#[utoipa::path(
+    tag = "Machine Learning",
+    post,
+    path = "/ml/train",
+    request_body = MLTrainRequest,
+    responses(
+        (
+            status = 200, description = "Model training from workflows", body = TaskResponse,
+            example = json!({"taskId": "7f8a4cfe-76ab-4972-b347-b197e5ef0f3c"})
+        )
+    ),
+    security(
+        ("session_token" = [])
+    )
+)]
+pub async fn ml_model_from_workflow_handler<C: Context>(
+    session: C::Session,
+    ctx: web::Data<C>,
+    info: web::Json<MLTrainRequest>,
+) -> Result<impl Responder> {
+    let task_id = schedule_ml_model_from_workflow_task(
+        info.input_workflows.clone(),
+        info.label_workflow.clone(),
+        session,
+        ctx.into_inner(),
+        info.into_inner(),
+    )
+    .await?;
+
+    Ok(web::Json(TaskResponse::new(task_id)))
+}
 
 /// Build ML Features from the raw data and assign feature names.
 pub async fn accumulate_raster_data(
