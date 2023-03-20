@@ -60,17 +60,15 @@ pub async fn accumulate_raster_data(
     qry_ctx: &dyn QueryContext,
     accum_variant: MachineLearningAggregator,
 ) -> Result<Vec<Result<MachineLearningFeature>>> {
-    let mut feature_counter = -1;
-
     let collected_ml_features = processors
         .iter()
         .zip(feature_names.iter())
-        .map(|(op, feature_name)| {
+        .enumerate()
+        .map(|(feature_pos, (op, feature_name))| {
             let name: String = if let Some(name) = feature_name {
                 name.clone()
             } else {
-                feature_counter += 1;
-                format!("feature_{feature_counter}")
+                format!("feature_{feature_pos}")
             };
 
             let ml_feature = match accum_variant {
