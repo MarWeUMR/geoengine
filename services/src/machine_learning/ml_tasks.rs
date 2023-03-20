@@ -60,7 +60,6 @@ pub struct MachineLearningModelFromWorkflowTask<C: Context> {
     pub ctx: Arc<C>,
     pub info: MLTrainRequest,
     pub query: VectorQueryRectangle,
-    pub upload: UploadId, // TODO: remove?
     pub store_path: PathBuf,
 }
 
@@ -148,7 +147,8 @@ impl<C: Context> Task<C::TaskContext> for MachineLearningModelFromWorkflowTask<C
     }
 
     fn task_unique_id(&self) -> Option<String> {
-        Some(self.upload.to_string())
+        // TODO: use properly generated id
+        Some(UploadId::new().to_string())
     }
 }
 
@@ -160,7 +160,6 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
     info: MLTrainRequest,
 ) -> error::Result<TaskId> {
     let store_path = get_config_element::<crate::util::config::MachineLearning>()?.model_defs_path;
-    let upload = UploadId::new();
 
     let task = MachineLearningModelFromWorkflowTask {
         input_workflows,
@@ -168,7 +167,6 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
         session,
         ctx: ctx.clone(),
         info: info.clone(),
-        upload,
         query: info.query,
         store_path,
     }
