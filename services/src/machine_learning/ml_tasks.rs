@@ -25,6 +25,7 @@ use serde_json::Value;
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 // TODO: fix schema example: construct a MWE here
 // #[schema(example = json!({"input_workflows":[{"operator":{"params":{"data":[{"globalGeoTransform":{"originCoordinate":{"x":0.0,"y":0.0},"xPixelSize":1.0,"yPixelSize":-1.0},"gridArray":{"innerGrid":{"data":[1,2,3,4,5,6,7,8],"shape":{"shapeArray":[4,2]}},"type":"grid","validityMask":{"data":[true,true,true,true,true,true,true,true],"shape":{"shapeArray":[4,2]}}},"properties":{"description":null,"offset":null,"properties_map":{},"scale":null},"tilePosition":[0,0],"time":{"end":8210298412799999,"start":-8334632851200000}}],"resultDescriptor":{"bbox":null,"dataType":"U8","measurement":{"type":"unitless"},"resolution":null,"spatialReference":"EPSG:4326","time":null}},"type":"MockRasterSourcei32"},"type":"Raster"},{"operator":{"params":{"data":[{"globalGeoTransform":{"originCoordinate":{"x":0.0,"y":0.0},"xPixelSize":1.0,"yPixelSize":-1.0},"gridArray":{"innerGrid":{"data":[9,10,11,12,13,14,15,16],"shape":{"shapeArray":[4,2]}},"type":"grid","validityMask":{"data":[true,true,true,true,true,true,true,true],"shape":{"shapeArray":[4,2]}}},"properties":{"description":null,"offset":null,"properties_map":{},"scale":null},"tilePosition":[0,0],"time":{"end":8210298412799999,"start":-8334632851200000}}],"resultDescriptor":{"bbox":null,"dataType":"U8","measurement":{"type":"unitless"},"resolution":null,"spatialReference":"EPSG:4326","time":null}},"type":"MockRasterSourcei32"},"type":"Raster"}],"label_workflow":[{"operator":{"params":{"data":[{"globalGeoTransform":{"originCoordinate":{"x":0.0,"y":0.0},"xPixelSize":1.0,"yPixelSize":-1.0},"gridArray":{"innerGrid":{"data":[0,1,2,2,2,1,0,0],"shape":{"shapeArray":[4,2]}},"type":"grid","validityMask":{"data":[true,true,true,true,true,true,true,true],"shape":{"shapeArray":[4,2]}}},"properties":{"description":null,"offset":null,"properties_map":{},"scale":null},"tilePosition":[0,0],"time":{"end":8210298412799999,"start":-8334632851200000}}],"resultDescriptor":{"bbox":null,"dataType":"U8","measurement":{"type":"unitless"},"resolution":null,"spatialReference":"EPSG:4326","time":null}},"type":"MockRasterSourcei32"},"type":"Raster"}],"params":{"aggregateVariant":"Simple","featureNames":["a","b","target"],"modelStorePath":"some_model.json","noDataValue":-1000.0,"trainingConfig":{"eta":"0.75","max_depth":"10","num_class":"4","objective":"multi:softmax","process_type":"default","tree_method":"hist","validate_parameters":"1"}},"query":{"spatialBounds":{"lowerLeftCoordinate":{"x":-180.0,"y":-90.0},"upperRightCoordinate":{"x":180.0,"y":90.0}},"spatialResolution":{"x":1.0,"y":1.0},"timeInterval":{"end":1385899200000,"start":1385899200000}}}))]
+#[serde(rename_all = "camelCase")]
 pub struct MLTrainRequest {
     pub params: XgboostTrainingParams,
     pub input_workflows: Vec<Workflow>,
@@ -35,6 +36,7 @@ pub struct MLTrainRequest {
 /// parameter for the dataset from workflow handler (body)
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[schema(example = json!({"name": "foo", "description": null, "query": {"spatialBounds": {"upperLeftCoordinate": {"x": -10.0, "y": 80.0}, "lowerRightCoordinate": {"x": 50.0, "y": 20.0}}, "timeInterval": {"start": 1_388_534_400_000_i64, "end": 1_388_534_401_000_i64}, "spatialResolution": {"x": 0.1, "y": 0.1}}}))]
+#[serde(rename_all = "camelCase")]
 pub struct MachineLearningModelFromWorkflow {
     pub name: String,
     pub description: Option<String>,
@@ -43,6 +45,7 @@ pub struct MachineLearningModelFromWorkflow {
 
 /// response of the machine learning model from workflow handler
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MachineLearningModelFromWorkflowResult {
     pub store_path: PathBuf,
     pub model: Value,

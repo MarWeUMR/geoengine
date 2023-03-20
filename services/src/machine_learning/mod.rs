@@ -33,6 +33,7 @@ impl MachineLearningFeature {
 /// This enum represents the different aggregators that can be used to initialize the
 /// different algorithms for collecting the data used in ml training.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub enum MachineLearningAggregator {
     Simple,
     ReservoirSampling,
