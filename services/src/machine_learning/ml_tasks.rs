@@ -58,24 +58,24 @@ pub struct MachineLearningModelFromWorkflowTask<C: Context> {
     pub label_workflow: Vec<Workflow>,
     pub session: C::Session,
     pub ctx: Arc<C>,
-    pub info: MLTrainRequest,
+    pub request: MLTrainRequest,
     pub query: VectorQueryRectangle,
     pub store_path: PathBuf,
 }
 
 impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
     async fn process(&self) -> error::Result<MachineLearningModelFromWorkflowResult> {
-        let agg_variant = self.info.params.aggregate_variant.clone();
-        let train_cfg = self.info.params.training_config.clone();
-        let mut feature_names = self.info.params.feature_names.clone();
+        let agg_variant = self.request.params.aggregate_variant.clone();
+        let train_cfg = self.request.params.training_config.clone();
+        let mut feature_names = self.request.params.feature_names.clone();
 
         // put the labels workflow at the end of the workflow vec
-        let mut inputs = self.info.input_workflows.clone();
-        let labels = self.info.label_workflow.clone();
+        let mut inputs = self.request.input_workflows.clone();
+        let labels = self.request.label_workflow.clone();
         inputs.extend(labels);
 
         // do the same for the names
-        feature_names.extend(Some(self.info.params.label_name.clone()));
+        feature_names.extend(Some(self.request.params.label_name.clone()));
 
         ensure!(
             inputs.len() == feature_names.len(),
@@ -166,7 +166,7 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
         label_workflow,
         session,
         ctx: ctx.clone(),
-        info: info.clone(),
+        request: info.clone(),
         query: info.query,
         store_path,
     }
