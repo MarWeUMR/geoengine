@@ -59,7 +59,6 @@ pub struct MachineLearningModelFromWorkflowTask<C: Context> {
     pub session: C::Session,
     pub ctx: Arc<C>,
     pub request: MLTrainRequest,
-    pub query: VectorQueryRectangle,
     pub store_path: PathBuf,
 }
 
@@ -91,7 +90,7 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
 
         let typed_query_processors = get_query_processors(input_operators, &exe_ctx).await?;
 
-        let query = self.query;
+        let query = self.request.query;
         let query_ctx = self.ctx.query_context(self.session.clone())?;
 
         let mut accumulated_data = accumulate_raster_data(
@@ -167,7 +166,6 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
         session,
         ctx: ctx.clone(),
         request: info.clone(),
-        query: info.query,
         store_path,
     }
     .boxed();
