@@ -75,8 +75,7 @@ where
 
     #[cfg(feature = "xgboost")]
     cfg.service(
-        web::resource("mlModelFromWorkflows")
-            .route(web::post().to(ml_model_from_workflow_handler::<C>)),
+        web::resource("/ml/train").route(web::post().to(ml_model_from_workflow_handler::<C>)),
     );
 }
 
@@ -643,17 +642,16 @@ async fn vector_stream_websocket<C: ApplicationContext>(
     }
 }
 
-// FIXME: what should be in here?
 #[cfg(feature = "xgboost")]
 #[utoipa::path(
-    tag = "Workflows",
+    tag = "Machine Learning",
     post,
-    path = "/mlModelFromWorkflows",
-    request_body = MlModelFromWorkflows,
+    path = "/ml/train",
+    request_body = MLTrainRequest,
     responses(
         (
             status = 200, description = "Model training from workflows", body = TaskResponse,
-            example = json!({"task_id": "7f8a4cfe-76ab-4972-b347-b197e5ef0f3c"})
+            example = json!({"taskId": "7f8a4cfe-76ab-4972-b347-b197e5ef0f3c"})
         )
     ),
     security(
@@ -1612,7 +1610,7 @@ mod tests {
         };
 
         let req = test::TestRequest::post()
-            .uri("/mlModelFromWorkflows")
+            .uri("/ml/train")
             .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())))
             .set_json(xg_train);
 
