@@ -1,7 +1,6 @@
 use futures::StreamExt;
 use geoengine_datatypes::primitives::VectorQueryRectangle;
 
-#[cfg(feature = "xgboost")]
 use geoengine_datatypes::raster::GridOrEmpty;
 use geoengine_operators::call_on_generic_raster_processor;
 use geoengine_operators::engine::{

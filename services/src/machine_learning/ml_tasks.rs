@@ -52,17 +52,14 @@ pub struct MachineLearningModelFromWorkflow {
 }
 
 /// response of the machine learning model from workflow handler
-#[cfg(feature = "xgboost")]
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct MachineLearningModelFromWorkflowResult {
     pub store_path: PathBuf,
     pub model: Value,
 }
 
-#[cfg(feature = "xgboost")]
 impl TaskStatusInfo for MachineLearningModelFromWorkflowResult {}
 
-#[cfg(feature = "xgboost")]
 pub struct MachineLearningModelFromWorkflowTask<C: Context> {
     pub input_workflows: Vec<Workflow>,
     pub label_workflow: Vec<Workflow>,
@@ -74,7 +71,6 @@ pub struct MachineLearningModelFromWorkflowTask<C: Context> {
     pub store_path: PathBuf,
 }
 
-#[cfg(feature = "xgboost")]
 impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
     async fn process(&self) -> error::Result<MachineLearningModelFromWorkflowResult> {
         let agg_variant = self.info.params.aggregate_variant.clone();
@@ -117,7 +113,6 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
     }
 }
 
-#[cfg(feature = "xgboost")]
 #[async_trait::async_trait]
 impl<C: Context> Task<C::TaskContext> for MachineLearningModelFromWorkflowTask<C> {
     async fn run(
@@ -151,7 +146,6 @@ impl<C: Context> Task<C::TaskContext> for MachineLearningModelFromWorkflowTask<C
     }
 }
 
-#[cfg(feature = "xgboost")]
 pub async fn schedule_ml_model_from_workflow_task<C: Context>(
     input_workflows: Vec<Workflow>,
     label_workflow: Vec<Workflow>,
