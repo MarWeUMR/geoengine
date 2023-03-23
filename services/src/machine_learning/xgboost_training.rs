@@ -26,7 +26,7 @@ pub struct XgboostTrainingParams {
 }
 
 pub fn xgb_train_model(
-    results: &mut Vec<Result<MachineLearningFeature>>,
+    results: &mut Vec<MachineLearningFeature>,
     training_config: HashMap<String, String>,
 ) -> Result<Value> {
     ensure!(
@@ -39,21 +39,10 @@ pub fn xgb_train_model(
         .pop()
         .expect("There should have been at least two features!");
 
-    let raw_data = results
-        .iter_mut()
-        .map(|elem| {
-            let feature_data: &Vec<f32> = &elem
-                .as_ref()
-                .map_err(|_| {
-                    XgModuleError::XGBoostModuleError::MachineLearningFeatureDataNotAvailable
-                })?
-                .feature_data;
-            Ok(feature_data)
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+
+    let raw_data: Vec<&f32> = results.iter().flat_map(|elem|{
+       &elem.feature_data 
+    }).collect();
 
     let n_rows = raw_data.len() / n_bands;
 
@@ -77,7 +66,7 @@ pub fn xgb_train_model(
     )
     .context(XgModuleError::error::CreateDMatrix)?;
 
-    let lbls_remap = remap_labels(lbls?.feature_data)?;
+    let lbls_remap = remap_labels(lbls.feature_data)?;
 
     dmatrix
         .set_labels(lbls_remap.as_slice())

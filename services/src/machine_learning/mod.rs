@@ -47,41 +47,49 @@ pub trait Aggregatable {
     fn aggregate(&mut self, incoming_data: Self::Data);
 
     /// Once the aggregation process is finished, return the data for further usage.
-    fn finish(self) -> Self::Data;
+    fn finish(&self) -> &Self::Data;
 }
 
 /// A simple aggregator that just collects all incoming data in a vector.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SimpleAggregator<T> {
     pub data: Vec<T>,
 }
 
-impl<T> Aggregatable for SimpleAggregator<T> {
+impl<T> Aggregatable for SimpleAggregator<T>
+where
+    T: Send + 'static,
+{
     type Data = Vec<T>;
 
     fn aggregate(&mut self, incoming_data: Vec<T>) {
         self.data.extend(incoming_data);
     }
 
-    fn finish(self) -> Vec<T> {
-        self.data
+    fn finish(&self) -> &Vec<T> {
+        &self.data
     }
 }
 
 /// A reservoir sampling aggregator that samples a given number of elements from the incoming data.
 /// This aggregator can be used, when the data size exceeds the available memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReservoirSamplingAggregator<T> {
     pub data: Vec<T>,
 }
 
 // TODO: implement reservoir sampling
-impl<T> Aggregatable for ReservoirSamplingAggregator<T> {
+impl<T> Aggregatable for ReservoirSamplingAggregator<T>
+where
+    T: Send + 'static,
+{
     type Data = Vec<T>;
 
     fn aggregate(&mut self, incoming_data: Vec<T>) {
         self.data.extend(incoming_data);
     }
 
-    fn finish(self) -> Vec<T> {
-        self.data
+    fn finish(&self) -> &Vec<T> {
+        &self.data
     }
 }

@@ -68,6 +68,14 @@ pub enum XGBoostModuleError {
 
     MachineLearningMustHaveAtLeastTwoFeatures,
     MachineLearningFeatureDataNotAvailable,
+    #[snafu(display("The aggregator at index {} could not be referenced", index))]
+    CouldNotGetMlAggregatorRef {
+        index: usize,
+    },
+    #[snafu(display("The feature name at index {} could not be found", index))]
+    CouldNotGetMlFeatureName {
+        index: usize,
+    },
     CouldNotGetMlLabelKeyName,
     CouldNotGetMlModelPath,
 }

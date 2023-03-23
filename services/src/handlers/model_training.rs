@@ -1,22 +1,25 @@
+
 use actix_web::{web, Responder};
-use futures::StreamExt;
+use futures::stream::select_all;
+use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use geoengine_datatypes::primitives::VectorQueryRectangle;
 
-use geoengine_datatypes::raster::GridOrEmpty;
+use geoengine_datatypes::raster::{ConvertDataTypeParallel, GridOrEmpty};
 use geoengine_operators::call_on_generic_raster_processor;
 use geoengine_operators::engine::{
     ExecutionContext, InitializedRasterOperator, QueryContext, QueryProcessor, RasterOperator,
     TypedRasterQueryProcessor,
 };
-use num_traits::AsPrimitive;
+use geoengine_operators::util::spawn_blocking_with_thread_pool;
 
 use super::tasks::TaskResponse;
 use crate::contexts::Context;
 use crate::error::Error;
 use crate::error::Result;
 use crate::machine_learning::{
-    schedule_ml_model_from_workflow_task, Aggregatable, MLTrainRequest, MachineLearningAggregator,
-    MachineLearningFeature, SimpleAggregator,
+    schedule_ml_model_from_workflow_task, xg_error::XGBoostModuleError as XgModuleError,
+    Aggregatable, MLTrainRequest, MachineLearningAggregator, MachineLearningFeature,
+    ReservoirSamplingAggregator, SimpleAggregator,
 };
 use crate::workflows::workflow::Workflow;
 
@@ -52,47 +55,9 @@ pub async fn ml_model_from_workflow_handler<C: Context>(
     Ok(web::Json(TaskResponse::new(task_id)))
 }
 
-/// Build ML Features from the raw data and assign feature names.
-pub async fn accumulate_raster_data(
-    feature_names: Vec<Option<String>>,
-    processors: Vec<TypedRasterQueryProcessor>,
-    query: VectorQueryRectangle,
-    qry_ctx: &dyn QueryContext,
-    accum_variant: MachineLearningAggregator,
-) -> Result<Vec<Result<MachineLearningFeature>>> {
-    let collected_ml_features = processors
-        .iter()
-        .zip(feature_names.iter())
-        .enumerate()
-        .map(|(feature_pos, (op, feature_name))| {
-            let name: String = if let Some(name) = feature_name {
-                name.clone()
-            } else {
-                format!("feature_{feature_pos}")
-            };
 
-            let ml_feature = match accum_variant {
-                MachineLearningAggregator::Simple => {
-                    let aggregator = SimpleAggregator::<f32> { data: Vec::new() };
-                    let feature = process_raster::<SimpleAggregator<f32>>(
-                        name, op, query, qry_ctx, aggregator,
-                    );
-                    feature
-                }
-                MachineLearningAggregator::ReservoirSampling => {
-                    todo!()
-                }
-            };
-
-            ml_feature
-        })
-        .collect::<Vec<_>>();
-
-    let results: Vec<Result<MachineLearningFeature>> =
-        futures::future::join_all(collected_ml_features).await;
-    Ok(results)
-}
-
+/// This method initializes the raster operators and produces a vector of typed raster query
+/// processors.
 pub async fn get_query_processors(
     operators: Vec<Box<dyn RasterOperator>>,
     exe_ctx: &dyn ExecutionContext,
@@ -130,44 +95,108 @@ pub fn get_operators_from_workflows(
     Ok(initialized_raster_operators)
 }
 
-/// Collect data from a raster source into a ML Feature
-async fn process_raster<C: Aggregatable<Data = Vec<f32>>>(
-    name: String,
-    input_rpq: &TypedRasterQueryProcessor,
+
+/// This method forwards the collected tile data to the appropriate implementation of
+/// the actual aggregation algorithm.
+fn accumulate_tile_data(
+    tile_data: Vec<Option<f32>>,
+    accumulator: &mut Box<dyn Aggregatable<Data = Vec<f32>> + Send>,
+) {
+    let v = tile_data
+        .into_iter()
+        .filter_map(|elem| elem)
+        .collect::<Vec<f32>>();
+
+    accumulator.aggregate(v);
+}
+
+/// Build ML Features from the raw data and assign feature names.
+pub async fn accumulate_raster_data(
+    feature_names: Vec<Option<String>>,
+    processors: Vec<TypedRasterQueryProcessor>,
     query: VectorQueryRectangle,
     ctx: &dyn QueryContext,
-    mut aggregator_variant: C,
-) -> Result<MachineLearningFeature> {
-    call_on_generic_raster_processor!(input_rpq, processor => {
+    accum_variant: MachineLearningAggregator,
+) -> Result<Vec<MachineLearningFeature>> {
+    type MlData = Box<dyn Aggregatable<Data = Vec<f32>> + Send>;
 
-        let mut stream = processor.query(query.into(), ctx).await?;
+    let mut queries = Vec::with_capacity(processors.len());
+    let q = query.into();
+    for (i, raster_processor) in processors.iter().enumerate() {
+        queries.push(
+            call_on_generic_raster_processor!(raster_processor, processor => {
+                processor.query(q, ctx).await?
+                         .and_then(
+                            move |tile| spawn_blocking_with_thread_pool(
+                                ctx.thread_pool().clone(),
+                                move || (i, tile.convert_data_type_parallel()) ).map_err(Into::into)
+                        ).boxed()
+            }),
+        );
+    }
 
-        while let Some(tile) = stream.next().await {
-            let tile = tile?;
+    let mut aggregator_vec = Vec::new();
+    let n_rasters = processors.len();
 
-            match tile.grid_array {
-                // Ignore empty grids if no_data should not be included
-                GridOrEmpty::Empty(_) => {},
-                GridOrEmpty::Grid(grid) => {
-                    // fetch the tile data
-                    let values = grid
-                        .masked_element_deref_iterator()
-                        .filter_map(|pixel_option| {
-                            pixel_option.map(|p| {
-                                let v: f32 = p.as_();
-                                v
-                            })
-                        }).collect(); // TODO: make this work for more types
-
-                    // now let the accumulator collect the data
-                    aggregator_variant.aggregate(values);
-                }
-            }
+    // populate the aggregator vector with an aggregator for each raster
+    match accum_variant {
+        MachineLearningAggregator::Simple => {
+            (0..n_rasters).into_iter().for_each(|_| {
+                let aggregator = SimpleAggregator::<f32> { data: Vec::new() };
+                aggregator_vec.push(Box::new(aggregator) as MlData);
+            });
         }
+        MachineLearningAggregator::ReservoirSampling => {
+            (0..n_rasters).into_iter().for_each(|_| {
+                let aggregator = ReservoirSamplingAggregator::<f32> { data: Vec::new() };
+                aggregator_vec.push(Box::new(aggregator) as MlData);
+            });
+        }
+    }
 
-        let collected_data = aggregator_variant.finish();
+    let result = select_all(queries)
+        .fold(
+            Ok(aggregator_vec),
+            |aggregator_vec: Result<Vec<MlData>>, enumerated_raster_tile| async move {
+                let mut aggregator_vec = aggregator_vec?;
+                let (i, raster_tile) = enumerated_raster_tile?;
 
-        Ok(MachineLearningFeature::new(Some(name), collected_data))
+                let res = match raster_tile.grid_array {
+                    GridOrEmpty::Grid(g) => {
+                        let agg = aggregator_vec.get_mut(i).ok_or_else(|| {
+                            XgModuleError::CouldNotGetMlAggregatorRef { index: i }
+                        })?;
 
-    })
+                        let tile_data: Vec<_> = g.masked_element_deref_iterator().collect();
+
+                        accumulate_tile_data(tile_data, agg);
+
+                        Ok(aggregator_vec)
+                    }
+                    GridOrEmpty::Empty(_) => Ok(aggregator_vec),
+                };
+
+                res
+            },
+        )
+        .map(|aggregator_vec| {
+            let ml_feature_vec = aggregator_vec?
+                .into_iter()
+                .enumerate()
+                .map(|(i, agg)| {
+                    let name = feature_names
+                        .get(i)
+                        .ok_or_else(|| XgModuleError::CouldNotGetMlFeatureName { index: i })?;
+                    let collected_data = agg.finish();
+                    let ml_feature =
+                        MachineLearningFeature::new(name.clone(), collected_data.to_vec());
+
+                    Ok(ml_feature)
+                })
+                .collect::<Result<Vec<MachineLearningFeature>>>();
+            ml_feature_vec
+        })
+        .await;
+
+    result
 }
