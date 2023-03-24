@@ -102,10 +102,7 @@ fn accumulate_tile_data(
     tile_data: Vec<Option<f32>>,
     accumulator: &mut Box<dyn Aggregatable<Data = Vec<f32>> + Send>,
 ) {
-    let v = tile_data
-        .into_iter()
-        .filter_map(|elem| elem)
-        .collect::<Vec<f32>>();
+    let v = tile_data.into_iter().flatten().collect::<Vec<f32>>();
 
     accumulator.aggregate(v);
 }
@@ -164,9 +161,9 @@ pub async fn accumulate_raster_data(
 
                 let res = match raster_tile.grid_array {
                     GridOrEmpty::Grid(g) => {
-                        let agg = aggregator_vec.get_mut(i).ok_or_else(|| {
-                            XgModuleError::CouldNotGetMlAggregatorRef { index: i }
-                        })?;
+                        let agg = aggregator_vec
+                            .get_mut(i)
+                            .ok_or(XgModuleError::CouldNotGetMlAggregatorRef { index: i })?;
 
                         let tile_data: Vec<_> = g.masked_element_deref_iterator().collect();
 
@@ -181,21 +178,20 @@ pub async fn accumulate_raster_data(
             },
         )
         .map(|aggregator_vec| {
-            let ml_feature_vec = aggregator_vec?
+            aggregator_vec?
                 .into_iter()
                 .enumerate()
                 .map(|(i, agg)| {
                     let name = feature_names
                         .get(i)
-                        .ok_or_else(|| XgModuleError::CouldNotGetMlFeatureName { index: i })?;
+                        .ok_or(XgModuleError::CouldNotGetMlFeatureName { index: i })?;
                     let collected_data = agg.finish();
                     let ml_feature =
-                        MachineLearningFeature::new(name.clone(), collected_data.to_vec());
+                        MachineLearningFeature::new(name.clone(), collected_data.clone());
 
                     Ok(ml_feature)
                 })
-                .collect::<Result<Vec<MachineLearningFeature>>>();
-            ml_feature_vec
+                .collect::<Result<Vec<MachineLearningFeature>>>()
         })
         .await;
 

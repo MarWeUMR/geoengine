@@ -703,9 +703,6 @@ mod tests {
         GdalGeoTiffOptions,
     };
 
-    use std::path::PathBuf;
-    use tokio::{fs::File, io::AsyncReadExt};
-
     use serde_json::json;
     use std::io::Read;
     use std::sync::Arc;
@@ -718,6 +715,8 @@ mod tests {
         geoengine_operators::util::helper::generate_raster_test_data_band_helper,
         serial_test::serial,
         std::collections::HashMap,
+        std::path::PathBuf,
+        tokio::{fs::File, io::AsyncReadExt},
     };
 
     async fn register_test_helper(method: Method) -> ServiceResponse {
@@ -1591,7 +1590,6 @@ mod tests {
         let task_response =
             serde_json::from_str::<TaskResponse>(&read_body_string(res).await).unwrap();
 
-
         let tasks = Arc::new(ctx.tasks());
 
         wait_for_task_to_finish(tasks.clone(), task_response.task_id).await;
@@ -1629,7 +1627,7 @@ mod tests {
         let model_path = &cfg.model_defs_path.join("some_model.json");
         let exe_ctx = ctx.execution_context().unwrap();
         let model_from_disk = exe_ctx
-            .read_ml_model(model_path.to_path_buf())
+            .read_ml_model(model_path.clone())
             .await
             .expect("Could not read specified ml model from disk");
 
@@ -1637,7 +1635,7 @@ mod tests {
 
         // clean up after testing
         std::fs::remove_dir_all(
-            &cfg.model_defs_path
+            cfg.model_defs_path
                 .parent()
                 .expect("Could not access parent directory of test model store directory"),
         )
