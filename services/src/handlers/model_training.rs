@@ -1,3 +1,4 @@
+use std::sync::Arc;
 
 use actix_web::{web, Responder};
 use futures::stream::select_all;
@@ -13,7 +14,7 @@ use geoengine_operators::engine::{
 use geoengine_operators::util::spawn_blocking_with_thread_pool;
 
 use super::tasks::TaskResponse;
-use crate::contexts::Context;
+use crate::contexts::ApplicationContext;
 use crate::error::Error;
 use crate::error::Result;
 use crate::machine_learning::{
@@ -38,23 +39,23 @@ use crate::workflows::workflow::Workflow;
         ("session_token" = [])
     )
 )]
-pub async fn ml_model_from_workflow_handler<C: Context>(
+pub async fn ml_model_from_workflow_handler<C: ApplicationContext>(
     session: C::Session,
-    ctx: web::Data<C>,
+    app_ctx: web::Data<C>,
     info: web::Json<MLTrainRequest>,
 ) -> Result<impl Responder> {
+    let ctx = Arc::new(app_ctx.session_context(session));
+
     let task_id = schedule_ml_model_from_workflow_task(
         info.input_workflows.clone(),
         info.label_workflow.clone(),
-        session,
-        ctx.into_inner(),
+        ctx,
         info.into_inner(),
     )
     .await?;
 
     Ok(web::Json(TaskResponse::new(task_id)))
 }
-
 
 /// This method initializes the raster operators and produces a vector of typed raster query
 /// processors.
@@ -94,7 +95,6 @@ pub fn get_operators_from_workflows(
         .collect::<Result<Vec<_>, Error>>()?;
     Ok(initialized_raster_operators)
 }
-
 
 /// This method forwards the collected tile data to the appropriate implementation of
 /// the actual aggregation algorithm.

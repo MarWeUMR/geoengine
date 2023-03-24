@@ -248,7 +248,6 @@ where
         model_sub_path: std::path::PathBuf,
         ml_model_str: String,
     ) -> geoengine_operators::util::Result<()> {
-                
         // make sure, that the model sub path is not escaping the config path
         // FIXME: how to generate the model name/id?
         let model_path = path_with_base_path(&model_sub_path, &PathBuf::from("some_model.json"))

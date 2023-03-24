@@ -1,4 +1,4 @@
-use crate::contexts::Context;
+use crate::contexts::SessionContext;
 use crate::datasets::upload::UploadId;
 use crate::error;
 use crate::handlers::model_training::{
@@ -53,16 +53,15 @@ pub struct MachineLearningModelFromWorkflowResult {
 
 impl TaskStatusInfo for MachineLearningModelFromWorkflowResult {}
 
-pub struct MachineLearningModelFromWorkflowTask<C: Context> {
+pub struct MachineLearningModelFromWorkflowTask<C: SessionContext> {
     pub input_workflows: Vec<Workflow>,
     pub label_workflow: Vec<Workflow>,
-    pub session: C::Session,
     pub ctx: Arc<C>,
     pub request: MLTrainRequest,
     pub store_path: PathBuf,
 }
 
-impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
+impl<C: SessionContext> MachineLearningModelFromWorkflowTask<C> {
     async fn process(&self) -> error::Result<MachineLearningModelFromWorkflowResult> {
         let agg_variant = self.request.params.aggregate_variant.clone();
         let train_cfg = self.request.params.training_config.clone();
@@ -86,12 +85,12 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
 
         let input_operators = get_operators_from_workflows(inputs)?;
 
-        let mut exe_ctx = self.ctx.execution_context(self.session.clone())?;
+        let mut exe_ctx = self.ctx.execution_context()?;
 
         let typed_query_processors = get_query_processors(input_operators, &exe_ctx).await?;
 
         let query = self.request.query;
-        let query_ctx = self.ctx.query_context(self.session.clone())?;
+        let query_ctx = self.ctx.query_context()?;
 
         let mut accumulated_data = accumulate_raster_data(
             feature_names,
@@ -118,7 +117,7 @@ impl<C: Context> MachineLearningModelFromWorkflowTask<C> {
 }
 
 #[async_trait::async_trait]
-impl<C: Context> Task<C::TaskContext> for MachineLearningModelFromWorkflowTask<C> {
+impl<C: SessionContext> Task<C::TaskContext> for MachineLearningModelFromWorkflowTask<C> {
     async fn run(
         &self,
         _ctx: C::TaskContext,
@@ -151,10 +150,9 @@ impl<C: Context> Task<C::TaskContext> for MachineLearningModelFromWorkflowTask<C
     }
 }
 
-pub async fn schedule_ml_model_from_workflow_task<C: Context>(
+pub async fn schedule_ml_model_from_workflow_task<C: SessionContext>(
     input_workflows: Vec<Workflow>,
     label_workflow: Vec<Workflow>,
-    session: C::Session,
     ctx: Arc<C>,
     info: MLTrainRequest,
 ) -> error::Result<TaskId> {
@@ -163,14 +161,13 @@ pub async fn schedule_ml_model_from_workflow_task<C: Context>(
     let task = MachineLearningModelFromWorkflowTask {
         input_workflows,
         label_workflow,
-        session,
         ctx: ctx.clone(),
         request: info.clone(),
         store_path,
     }
     .boxed();
 
-    let task_id = ctx.tasks_ref().schedule(task, None).await?;
+    let task_id = ctx.tasks().schedule_task(task, None).await?;
 
     Ok(task_id)
 }

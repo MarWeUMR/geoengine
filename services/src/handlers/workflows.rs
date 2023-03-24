@@ -713,7 +713,6 @@ mod tests {
     use zip::ZipArchive;
     #[cfg(feature = "xgboost")]
     use {
-        crate::contexts::SimpleSession,
         crate::machine_learning::MachineLearningModelFromWorkflowResult,
         geoengine_datatypes::primitives::{BoundingBox2D, QueryRectangle, VectorQueryRectangle},
         geoengine_operators::util::helper::generate_raster_test_data_band_helper,
@@ -1507,12 +1506,15 @@ mod tests {
             tile_size_in_pixels: GridShape::new([4, 2]),
         };
 
-        let ctx = InMemoryContext::new_with_context_spec(
+        let app_ctx = InMemoryContext::new_with_context_spec(
             exe_ctx_tiling_spec,
             TestDefault::test_default(),
         );
 
-        let session_id = ctx.default_session_ref().await.id();
+        let ctx = app_ctx.default_session_context().await;
+
+        let session = app_ctx.default_session_ref().await.clone();
+        let session_id = session.id();
 
         let src_a = generate_raster_test_data_band_helper(vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let src_b = generate_raster_test_data_band_helper(vec![9, 10, 11, 12, 13, 14, 15, 16]);
@@ -1582,16 +1584,19 @@ mod tests {
             .append_header((header::AUTHORIZATION, Bearer::new(session_id.to_string())))
             .set_json(xg_train);
 
-        let res = send_test_request(req, ctx.clone()).await;
+        let res = send_test_request(req, app_ctx.clone()).await;
 
         assert_eq!(res.status(), 200, "{:?}", res.response());
 
         let task_response =
             serde_json::from_str::<TaskResponse>(&read_body_string(res).await).unwrap();
 
-        wait_for_task_to_finish(ctx.tasks(), task_response.task_id).await;
 
-        let status = ctx.tasks().status(task_response.task_id).await.unwrap();
+        let tasks = Arc::new(ctx.tasks());
+
+        wait_for_task_to_finish(tasks.clone(), task_response.task_id).await;
+
+        let status = tasks.get_task_status(task_response.task_id).await.unwrap();
 
         let response = if let TaskStatus::Completed { info, .. } = status {
             info.as_any_arc()
@@ -1622,7 +1627,7 @@ mod tests {
 
         // also check, that the model (which was written after training) on disk is as expected
         let model_path = &cfg.model_defs_path.join("some_model.json");
-        let exe_ctx = ctx.execution_context(SimpleSession::default()).unwrap();
+        let exe_ctx = ctx.execution_context().unwrap();
         let model_from_disk = exe_ctx
             .read_ml_model(model_path.to_path_buf())
             .await

@@ -39,10 +39,7 @@ pub fn xgb_train_model(
         .pop()
         .expect("There should have been at least two features!");
 
-
-    let raw_data: Vec<&f32> = results.iter().flat_map(|elem|{
-       &elem.feature_data 
-    }).collect();
+    let raw_data: Vec<&f32> = results.iter().flat_map(|elem| &elem.feature_data).collect();
 
     let n_rows = raw_data.len() / n_bands;
 
