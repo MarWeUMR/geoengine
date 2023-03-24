@@ -110,6 +110,7 @@ fn accumulate_tile_data(
     accumulator.aggregate(v);
 }
 
+//TODO: add a way to abort the query execution when the tasks is aborted
 /// Build ML Features from the raw data and assign feature names.
 pub async fn accumulate_raster_data(
     feature_names: Vec<Option<String>>,
