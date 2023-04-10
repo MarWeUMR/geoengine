@@ -67,9 +67,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-          # Determines if the cache should be saved even when the workflow has failed.
-          # Default: "false"
-          #cache-on-failure: ""
       - name: Run tests
         env:
           RUSTFLAGS: -C incremental=target/incremental
