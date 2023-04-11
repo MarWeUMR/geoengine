@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, trying, staging]
+    branches: [master, trying, staging, tonic-version-upgrade]
   pull_request:
     branches: [master, trying, staging]
   # Allows you to run this workflow manually from the Actions tab
